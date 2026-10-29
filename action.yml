@@ -10,10 +10,10 @@ inputs:
     description: Force a tier (fast, normal or full) instead of choosing one.
     default: ""
   min-tier:
-    description: Lowest tier allowed (fast, normal or full). Raises the rule floor; never lowers it.
+    description: "Lowest tier allowed (fast, normal or full). Raises the rule floor; never lowers it."
     default: ""
   request-id:
-    description: Opaque correlation id echoed in the result artifact (1-128 of A-Z a-z 0-9 . _ : -).
+    description: "Opaque correlation id echoed in the result artifact (1-128 characters of A-Z a-z 0-9 . _ : -)."
     default: ""
   pr:
     description: PR number, for workflow_dispatch runs.

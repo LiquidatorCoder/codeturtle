@@ -346,3 +346,15 @@ class RedactionHardeningTests(unittest.TestCase):
         for leaked in ("rt_abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwx", "hunter2hunter2hunter2"):
             self.assertNotIn(leaked, out)
         self.assertIn("refresh_token", out)  # the key stays readable, only the value goes
+
+
+class YamlTests(unittest.TestCase):
+    def test_action_and_template_parse_as_yaml(self):
+        import pathlib, shutil, subprocess
+        ruby = shutil.which("ruby")
+        if not ruby:
+            self.skipTest("no YAML parser available")
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for name in ("action.yml", "examples/codeturtle.yml"):
+            proc = subprocess.run([ruby, "-ryaml", "-e", "YAML.load_file(ARGV[0])", str(root / name)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, f"{name}: {proc.stderr}")
