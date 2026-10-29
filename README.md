@@ -48,7 +48,36 @@ again, comment `/review` or `/review full`. Only owners, members and collaborato
 Add the `codeturtle:skip` label to skip the automatic run.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
-> starts working once the workflow is merged there.
+> (and dispatched reviews) start working once the workflow is merged there.
+
+## Machine-readable result (1.1)
+
+Every run uploads one artifact, `codeturtle-result-attempt-<run_attempt>`, holding `result.json`
+(`schema: "codeturtle.result"`, `schema_version: 1`, see [`codeturtle/result.py`](codeturtle/result.py)):
+repository, PR number, base/head refs and the **reviewed head SHA**, the run id/attempt/event, the
+caller's `request_id`, `status` (`completed`, `failed`, `usage_limited`, `skipped`), the tier and why,
+which providers ran (and how many model calls), the summary, every finding with a stable id
+(`ct-` + 12 hex of path, line, severity, title) and where it was posted, `findings_total` and
+per-severity `counts`, and the posted review's id/URL. It is redacted like the PR review and never
+holds a token, an environment variable, a prompt or model reasoning. The PR review and inline
+comments are unchanged; the artifact is for tools.
+
+A tool that consumes it must first check through the GitHub API that the artifact belongs to a
+**successful** run of `.github/workflows/codeturtle.yml` whose workflow file is identical to the
+default branch's (a `pull_request` run uses the PR's copy of the workflow, and a `workflow_dispatch`
+can name any ref), and that its repository, PR, head SHA and run match what it asked for. The Claude
+Code harness does exactly this before it signs a review.
+
+## Callers: minimum tier and request ids (1.1)
+
+- `workflow_dispatch` inputs `min_tier` and `request_id`, or the action inputs `min-tier` /
+  `request-id`. `min_tier` **raises** the rule floor (a triage model may raise it further); it never
+  lowers it, and a `/review fast` override is lifted to it too. `request_id` (1-128 of
+  `A-Za-z0-9._:-`) is echoed in the result and in the dispatched run's title
+  (`codeturtle PR <n> <request_id>`), so a caller can find the run it started.
+- A PR description containing `<!-- codeturtle:min-tier=full -->` raises the automatic PR-open review
+  the same way (it can only make the review deeper).
+- The workflow template declares `# codeturtle-protocol: 2`; tools check it before dispatching.
 
 ## Config (`.github/codeturtle.json`)
 
@@ -99,6 +128,11 @@ A self-hosted runner executes on your Mac with your AI logins, so:
   Guidelines come from the base branch.
 - **No GitHub token reaches a model.** The CLIs run with a minimal allow-listed environment; only the
   posting step uses `GITHUB_TOKEN`. Anything that looks like a key or token is redacted before posting.
+- `workflow_dispatch` and `issue_comment` always run the **default branch's** workflow; a
+  `pull_request` run uses the PR's copy, and anyone with write access can dispatch from another ref.
+  A consumer of the result artifact must therefore verify the run's workflow file (see above).
+- Other workflows on the same self-hosted runners (your CI) execute PR code with your login session:
+  the trust boundary for every runner on this Mac is "people with write access to the repo".
 - Codex and Grok can still read files elsewhere on the Mac in read-only mode. A malicious PR could try
   to make one quote a local file into the review, which is visible only on that private PR. This is
   why trusted authors matter.

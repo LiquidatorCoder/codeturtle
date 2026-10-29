@@ -337,3 +337,12 @@ class HarnessContractTests(unittest.TestCase):
         template = (root / "examples" / "codeturtle.yml").read_text()
         for needle in ("# codeturtle-protocol: 2", "min_tier:", "request_id:", "run-name:"):
             self.assertIn(needle, template)
+
+
+class RedactionHardeningTests(unittest.TestCase):
+    def test_login_file_shapes_are_redacted(self):
+        text = '{"refresh_token": "rt_abcdefghijklmnopqrstuvwxyz0123", "access_token": "abcdefghijklmnopqrstuvwx"} password=hunter2hunter2hunter2'
+        out = post.redact(text)
+        for leaked in ("rt_abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwx", "hunter2hunter2hunter2"):
+            self.assertNotIn(leaked, out)
+        self.assertIn("refresh_token", out)  # the key stays readable, only the value goes
