@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import TIERS, max_tier
+from . import TIERS, max_tier, tier_rank
 from .config import matches_any
 from .diff import FileChange
 
@@ -43,6 +43,13 @@ def floor_tier(files: list[FileChange], rules: dict) -> tuple[str, str]:
     if lines < rules["fast_if_lines_under"]:
         return "fast", f"small change ({lines} lines)"
     return "normal", f"{lines} changed lines across {len(reviewed)} files"
+
+
+def raise_floor(floor: str, reason: str, min_tier: str | None) -> tuple[str, str]:
+    """Apply a caller's minimum tier. It can only raise the rule floor, never lower it."""
+    if not min_tier or tier_rank(min_tier) <= tier_rank(floor):
+        return floor, reason
+    return min_tier, f"minimum tier {min_tier} requested by the caller ({reason})"
 
 
 def parse_command(body: str) -> tuple[bool, str | None]:

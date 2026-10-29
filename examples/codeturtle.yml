@@ -1,5 +1,8 @@
 # Copy to .github/workflows/codeturtle.yml in any repo that has the Mac runners (macci add owner/repo).
+# codeturtle-protocol: 2
 name: codeturtle
+# Dispatched runs carry the caller's request id in their title so a caller can find the run it started.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('codeturtle PR {0} {1}', inputs.pr, inputs.request_id) || 'codeturtle' }}
 
 on:
   pull_request:
@@ -13,6 +16,12 @@ on:
         required: true
       tier:
         description: fast, normal or full (empty = choose automatically)
+        required: false
+      min_tier:
+        description: lowest tier allowed (raises the automatic choice, never lowers it)
+        required: false
+      request_id:
+        description: caller's correlation id, echoed in the result artifact
         required: false
 
 permissions:

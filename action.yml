@@ -9,6 +9,12 @@ inputs:
   tier:
     description: Force a tier (fast, normal or full) instead of choosing one.
     default: ""
+  min-tier:
+    description: "Lowest tier allowed (fast, normal or full). Raises the rule floor; never lowers it."
+    default: ""
+  request-id:
+    description: "Opaque correlation id echoed in the result artifact (1-128 characters of A-Z a-z 0-9 . _ : -)."
+    default: ""
   pr:
     description: PR number, for workflow_dispatch runs.
     default: ""
@@ -28,7 +34,20 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         CODETURTLE_TIER: ${{ inputs.tier }}
+        CODETURTLE_MIN_TIER: ${{ inputs.min-tier }}
+        CODETURTLE_REQUEST_ID: ${{ inputs.request-id }}
         CODETURTLE_PR: ${{ inputs.pr }}
         CODETURTLE_PROVIDERS: ${{ inputs.providers }}
         CODETURTLE_DRY_RUN: ${{ inputs.dry-run }}
+        CODETURTLE_RESULT_PATH: ${{ runner.temp }}/codeturtle-result/result.json
       run: python3 -m codeturtle action
+    # The machine-readable result (schema in codeturtle/result.py). Uploaded even when the review
+    # failed, so a caller can tell a failed review from a missing one. Never holds a token.
+    - name: Upload review result
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: codeturtle-result-attempt-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/codeturtle-result/result.json
+        if-no-files-found: ignore
+        retention-days: 30

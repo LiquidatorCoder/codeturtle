@@ -19,12 +19,20 @@ SECRET_RES = [
     re.compile(r"\bxai-[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    # 1.1: the result artifact is machine-read too, so also catch the shapes of the runner's own
+    # login files (OAuth refresh tokens, `"access_token": "..."`, `password=...`) a prompt-injected
+    # model could be asked to quote.
+    re.compile(r"\b(?:rt|ort|sk-ant-oat01|sk-ant-ort01)[-_][A-Za-z0-9_.-]{20,}"),
+    re.compile(r"(?i)([\"']?(?:access|refresh|id|oauth|auth|api)[_-]?(?:token|key)|client[_-]?secret|password|passwd|secret)([\"']?\s*[:=]\s*[\"']?)[^\s\"',}]{12,}"),
 ]
 
 
 def redact(text: str) -> str:
     for pattern in SECRET_RES:
-        text = pattern.sub("[redacted]", text)
+        if pattern.groups >= 2:
+            text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
+        else:
+            text = pattern.sub("[redacted]", text)
     return text
 
 
