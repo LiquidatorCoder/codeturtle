@@ -1,0 +1,10 @@
+{
+  "providers": ["codex", "grok", "claude"],
+  "tiers": {
+    "full_paths": ["**/auth/**", "lib/payments/**", "**/migrations/**", ".github/workflows/**"],
+    "full_if_lines_over": 600,
+    "fast_if_lines_under": 30
+  },
+  "ignore_paths": ["**/*.g.dart", "**/*.freezed.dart", "**/pubspec.lock"],
+  "max_inline_comments": 20
+}

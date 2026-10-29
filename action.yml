@@ -1,0 +1,34 @@
+name: codeturtle
+description: AI pull request review on a self-hosted Mac runner (Codex → Grok → Claude on usage limits).
+author: LiquidatorCoder
+
+inputs:
+  github-token:
+    description: Token used to read the PR and post the review.
+    default: ${{ github.token }}
+  tier:
+    description: Force a tier (fast, normal or full) instead of choosing one.
+    default: ""
+  pr:
+    description: PR number, for workflow_dispatch runs.
+    default: ""
+  providers:
+    description: Comma-separated provider order, overriding the repo config (e.g. "grok,claude").
+    default: ""
+  dry-run:
+    description: Write the review to the job summary instead of posting it.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Review pull request
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CODETURTLE_TIER: ${{ inputs.tier }}
+        CODETURTLE_PR: ${{ inputs.pr }}
+        CODETURTLE_PROVIDERS: ${{ inputs.providers }}
+        CODETURTLE_DRY_RUN: ${{ inputs.dry-run }}
+      run: python3 -m codeturtle action

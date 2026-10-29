@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "2-4 sentences: what the PR does and its overall risk."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "category", "path", "line", "title", "body"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["blocker", "major", "minor", "nit"] },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "performance", "tests", "maintainability", "other"]
+          },
+          "path": { "type": "string", "description": "Repository-relative file path." },
+          "line": {
+            "type": "integer",
+            "description": "New-file line number (the R number in the diff). 0 if not tied to a line."
+          },
+          "title": { "type": "string", "description": "One-line statement of the problem." },
+          "body": {
+            "type": "string",
+            "description": "Why it is wrong, the concrete failure scenario, and the suggested fix."
+          }
+        }
+      }
+    }
+  }
+}

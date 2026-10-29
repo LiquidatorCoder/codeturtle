@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tier", "reason"],
+  "properties": {
+    "tier": { "type": "string", "enum": ["fast", "normal", "full"] },
+    "reason": { "type": "string", "description": "One sentence explaining the choice." }
+  }
+}
