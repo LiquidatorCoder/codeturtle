@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import github, post, prompts
+from . import max_tier
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
 from .events import Request
 from .progress import Progress
 from .providers import LABELS, AllLimited, Call, Chain, ProviderError, kill_all
-from .tiers import TierDecision, combine, floor_tier, label_override
+from .result import ResultWriter, with_ids
+from .tiers import TierDecision, combine, floor_tier, label_override, raise_floor
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
 AGENT_CONFIG_FILES = {
@@ -117,6 +119,7 @@ class Reviewer:
         self.cfg = DEFAULTS
         self.chain: Chain | None = None
         self.progress = Progress(req.repo, req.number, enabled=not dry_run, log=log)
+        self.result = ResultWriter(req)
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -125,6 +128,7 @@ class Reviewer:
         req = self.req
         self.pr_raw = github.get_pr(req.repo, req.number)
         pr = self.pr_raw
+        self.result.set_pr(pr)
         head_repo = (pr.get("head") or {}).get("repo") or {}
         if head_repo.get("full_name") != req.repo:
             return "PR comes from a fork; codeturtle never reviews fork code on a self-hosted runner"
@@ -174,8 +178,11 @@ class Reviewer:
         if override:
             sources = {"comment": "/review command", "cli": "--tier flag"}
             source = sources.get(self.req.trigger, "tier input") if self.req.override else "review label"
+            if self.req.min_tier and max_tier(override, self.req.min_tier) != override:
+                return TierDecision(self.req.min_tier, "min_tier", f"minimum tier {self.req.min_tier} requested by the caller (over {override} from {source})")
             return TierDecision(override, "override", f"requested by {source}")
         floor, reason = floor_tier(self.files, self.cfg["tiers"])
+        floor, reason = raise_floor(floor, reason, self.req.min_tier)
         if floor == "full":
             return TierDecision("full", "rules", reason)
         call = Call(
@@ -302,6 +309,9 @@ class Reviewer:
             summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=outcome.notes,
         )
         payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
+        self.result.summary = outcome.summary
+        self.result.notes = list(outcome.notes)
+        self.result.findings = with_ids(findings, inline)
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
         if self.dry_run:
@@ -312,11 +322,13 @@ class Reviewer:
             log(f"Dry run: review written to {target} ({len(inline)} inline, {len(rest)} in body)")
             return
         try:
-            github.post_review(self.req.repo, self.req.number, payload)
+            posted = github.post_review(self.req.repo, self.req.number, payload)
         except github.GitHubError as e:
             log(f"Posting inline comments failed ({e}); posting everything in the review body")
             body = post.build_body(inline=[], rest=findings, **body_args)
-            github.post_review(self.req.repo, self.req.number, post.build_payload(head_sha=self.head_sha, body=body, inline=[]))
+            posted = github.post_review(self.req.repo, self.req.number, post.build_payload(head_sha=self.head_sha, body=body, inline=[]))
+            self.result.findings = with_ids(findings, [])
+        self.result.review = {"id": posted.get("id"), "url": posted.get("html_url")}
         log(f"Posted review: {len(inline)} inline comments, {len(rest)} in the body")
 
     def fail(self, message: str) -> None:
@@ -328,13 +340,24 @@ class Reviewer:
 
     # ---- entry -------------------------------------------------------------------------------
 
+    def record_reviewers(self) -> None:
+        if self.chain:
+            self.result.reviewers = {
+                "providers_used": list(self.chain.used),
+                "models": {p: self.chain.models[p] for p in self.chain.used},
+                "usage_limited": list(self.chain.limit_notes),
+                "calls": self.chain.calls,
+            }
+
     def run(self) -> int:
+        status, error, skip = "failed", "the review stopped before it finished (cancelled or crashed)", None
         try:
             if self.req.comment_id and not self.dry_run:
                 github.react(self.req.repo, self.req.comment_id, "eyes")
             skip = self.load()
             if skip:
                 log(f"Skipping: {skip}")
+                status, error = "skipped", None
                 return 0
             self.progress.start()
             max_parallel = int(os.environ.get("CODETURTLE_MAX_PARALLEL", "1"))
@@ -345,6 +368,7 @@ class Reviewer:
                 with group("Choosing review tier"):
                     decision = self.choose_tier(self.work)
                     log(f"Tier: {decision.tier} ({decision.source}: {decision.reason})")
+                    self.result.tier = {"name": decision.tier, "source": decision.source, "reason": decision.reason}
                     self.progress.tier(decision.tier, decision.reason, decided_by=decision.source)
                     if decision.tier != "full":
                         self.progress.plan([decision.tier, "post"])
@@ -359,20 +383,27 @@ class Reviewer:
                     else:
                         outcome = self.review_single(decision.tier, self.work, snapshot)
                 self.publish(decision, outcome)
+            status, error = "completed", None
             return 0
         except AllLimited as e:
             self.progress.close()
             self.fail(f"Every reviewer is at its usage limit ({', '.join(self.chain.limit_notes)}). "
                       "Comment `/review` to try again once a limit resets.")
             log(str(e))
+            status, error = "usage_limited", str(e)
             return 1
         except (ProviderError, github.GitHubError) as e:
             self.progress.close()
             self.fail(f"The review failed: `{e}`. See the workflow run log for details.")
             log(f"Error: {e}")
+            status, error = "failed", str(e)
             return 1
         finally:
             self.progress.close()
+            self.record_reviewers()
+            if status != "completed":
+                self.result.findings = []  # a review that did not finish carries no verdict
+            self.result.write(status, error, skip)
 
 
 def write_step_summary(markdown: str) -> None:

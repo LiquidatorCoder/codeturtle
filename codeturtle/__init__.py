@@ -1,6 +1,9 @@
 """codeturtle: AI pull request review with a Codex -> Grok -> Claude fallback chain."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+# Version of the machine-readable result (`codeturtle-result-attempt-<n>` artifact); see result.py.
+RESULT_SCHEMA_VERSION = 1
 
 TIERS = ("fast", "normal", "full")
 

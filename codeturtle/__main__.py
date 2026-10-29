@@ -14,7 +14,7 @@ import signal
 import sys
 
 from . import TIERS
-from .events import Request, from_event
+from .events import BadRequest, Request, from_event
 from .review import Reviewer, log
 
 
@@ -29,11 +29,17 @@ def action() -> int:
     name = os.environ["GITHUB_EVENT_NAME"]
     with open(os.environ["GITHUB_EVENT_PATH"]) as fh:
         event = json.load(fh)
-    req, skip = from_event(
-        name, event, os.environ["GITHUB_REPOSITORY"],
-        tier_input=os.environ.get("CODETURTLE_TIER", ""),
-        pr_input=os.environ.get("CODETURTLE_PR", ""),
-    )
+    try:
+        req, skip = from_event(
+            name, event, os.environ["GITHUB_REPOSITORY"],
+            tier_input=os.environ.get("CODETURTLE_TIER", ""),
+            pr_input=os.environ.get("CODETURTLE_PR", ""),
+            min_tier_input=os.environ.get("CODETURTLE_MIN_TIER", ""),
+            request_id_input=os.environ.get("CODETURTLE_REQUEST_ID", ""),
+        )
+    except BadRequest as e:
+        log(f"Bad request: {e}")
+        return 1
     if req is None:
         log(f"Skipping: {skip}")
         return 0
@@ -52,12 +58,13 @@ def main(argv: list[str]) -> int:
     review.add_argument("--repo", required=True)
     review.add_argument("--pr", type=int, required=True)
     review.add_argument("--tier", choices=TIERS)
+    review.add_argument("--min-tier", choices=TIERS, help="lowest tier allowed (raises the rule floor)")
     review.add_argument("--providers", help="comma-separated order, e.g. grok,claude")
     review.add_argument("--dry-run", action="store_true", help="write the review to out/ instead of posting")
     args = parser.parse_args(argv)
     if args.command == "action":
         return action()
-    req = Request(args.repo, args.pr, "cli", args.tier)
+    req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier)
     return Reviewer(req, providers_arg(args.providers), args.dry_run).run()
 
 

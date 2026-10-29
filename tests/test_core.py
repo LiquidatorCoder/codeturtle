@@ -269,3 +269,71 @@ class SchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessContractTests(unittest.TestCase):
+    """min-tier floor, request correlation and the machine-readable result (codeturtle 1.1)."""
+
+    def test_min_tier_raises_never_lowers(self):
+        from codeturtle.tiers import raise_floor
+        self.assertEqual(raise_floor("fast", "small", "full")[0], "full")
+        self.assertEqual(raise_floor("full", "auth", "normal"), ("full", "auth"))
+        self.assertEqual(raise_floor("normal", "x", None), ("normal", "x"))
+
+    def test_dispatch_inputs_and_validation(self):
+        from codeturtle.events import BadRequest
+        event = {"inputs": {"pr": "12", "min_tier": "FULL", "request_id": "ht-abc:1"}}
+        req, _ = from_event("workflow_dispatch", event, "o/r")
+        self.assertEqual((req.number, req.min_tier, req.request_id, req.override), (12, "full", "ht-abc:1", None))
+        with self.assertRaises(BadRequest):
+            from_event("workflow_dispatch", {"inputs": {"pr": "1", "request_id": "bad id; rm -rf"}}, "o/r")
+        with self.assertRaises(BadRequest):
+            from_event("workflow_dispatch", {"inputs": {"pr": "1", "min_tier": "huge"}}, "o/r")
+
+    def test_pr_body_marker_sets_min_tier(self):
+        pr = {"number": 4, "body": "Fix\n<!-- codeturtle:min-tier=full -->"}
+        req, _ = from_event("pull_request", {"action": "opened", "pull_request": pr}, "o/r")
+        self.assertEqual(req.min_tier, "full")
+        pr["body"] = "no marker"
+        self.assertIsNone(from_event("pull_request", {"action": "opened", "pull_request": pr}, "o/r")[0].min_tier)
+
+    def test_result_payload_redacts_and_ids_findings(self):
+        import tempfile, os
+        from codeturtle.events import Request
+        from codeturtle.result import ResultWriter, finding_id, with_ids
+        findings = post.normalize([
+            {"severity": "major", "category": "security", "path": "a.py", "line": 3, "title": "Leak",
+             "body": "token ghp_" + "a" * 30},
+            {"severity": "nit", "category": "other", "path": "b.py", "line": 0, "title": "Name", "body": ""},
+        ], "normal")
+        ids = with_ids(findings, findings[:1])
+        self.assertEqual(ids[0]["placement"], "inline")
+        self.assertEqual(ids[1]["placement"], "body")
+        self.assertEqual(ids[0]["id"], finding_id(findings[0]))
+        self.assertNotIn("ghp_", json.dumps(ids))
+        req = Request("o/r", 7, "dispatch", min_tier="full", request_id="rq-1")
+        w = ResultWriter(req)
+        w.set_pr({"base": {"ref": "main", "sha": "b" * 40}, "head": {"ref": "feat", "sha": "h" * 40}})
+        w.findings = ids
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "r", "result.json")
+            env = {"CODETURTLE_RESULT_PATH": path, "GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1",
+                   "GITHUB_EVENT_NAME": "workflow_dispatch", "GH_TOKEN": "ghs_" + "x" * 30}
+            with mock.patch.dict(os.environ, env):
+                w.write("completed")
+            data = json.loads(open(path).read())
+        self.assertEqual((data["schema"], data["schema_version"], data["status"]), ("codeturtle.result", 1, "completed"))
+        self.assertEqual((data["run"]["id"], data["request_id"], data["pr"]["head_sha"]), (99, "rq-1", "h" * 40))
+        self.assertEqual((data["findings_total"], data["counts"]["major"], data["counts"]["nit"]), (2, 1, 1))
+        self.assertNotIn("ghs_", json.dumps(data))
+
+    def test_action_uploads_result_and_template_declares_protocol(self):
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        action = (root / "action.yml").read_text()
+        self.assertIn("CODETURTLE_RESULT_PATH", action)
+        self.assertIn("codeturtle-result-attempt-${{ github.run_attempt }}", action)
+        self.assertRegex(action, r"actions/upload-artifact@[0-9a-f]{40}")
+        template = (root / "examples" / "codeturtle.yml").read_text()
+        for needle in ("# codeturtle-protocol: 2", "min_tier:", "request_id:", "run-name:"):
+            self.assertIn(needle, template)

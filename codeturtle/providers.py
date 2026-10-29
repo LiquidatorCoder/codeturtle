@@ -245,6 +245,7 @@ class Chain:
     exhausted: list[str] = field(default_factory=list)
     limit_notes: list[str] = field(default_factory=list)
     used: list[str] = field(default_factory=list)
+    calls: int = 0  # model CLI invocations, every attempt counted
     on_attempt: callable = None  # (kind, "Codex (gpt-6-sol)") when a provider starts a call
     on_limit: callable = None  # ("Codex") when a provider hits its limit
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # passes may run in parallel
@@ -260,6 +261,8 @@ class Chain:
                 self.log(f"[{call.kind}] {LABELS[name]} ({model}, effort {call.effort}) attempt {attempt}")
                 if self.on_attempt:
                     self.on_attempt(call.kind, f"{LABELS[name]} ({model})")
+                with self.lock:
+                    self.calls += 1
                 try:
                     data = RUNNERS[name](call, model)
                 except LimitHit as hit:
