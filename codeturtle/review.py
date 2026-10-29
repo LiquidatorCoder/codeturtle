@@ -163,7 +163,8 @@ class Reviewer:
     def choose_tier(self, work: Path) -> TierDecision:
         override = self.req.override or label_override(self.labels)
         if override:
-            source = "/review command" if self.req.override else "label"
+            sources = {"comment": "/review command", "cli": "--tier flag"}
+            source = sources.get(self.req.trigger, "tier input") if self.req.override else "review label"
             return TierDecision(override, "override", f"requested by {source}")
         floor, reason = floor_tier(self.files, self.cfg["tiers"])
         if floor == "full":
