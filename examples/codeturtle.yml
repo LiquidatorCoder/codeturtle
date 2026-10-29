@@ -1,0 +1,35 @@
+# Copy to .github/workflows/codeturtle.yml in any repo that has the Mac runners (macci add owner/repo).
+name: codeturtle
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number
+        required: true
+      tier:
+        description: fast, normal or full (empty = choose automatically)
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write # 👀 reaction on /review comments and failure notices
+
+jobs:
+  review:
+    # Comments only start a job when they are a /review command on a PR.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+    runs-on: [self-hosted, macOS, ARM64, mac-ci]
+    timeout-minutes: 120
+    concurrency:
+      group: codeturtle-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr }}
+      cancel-in-progress: true
+    steps:
+      - uses: LiquidatorCoder/codeturtle@v1
