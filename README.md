@@ -37,6 +37,12 @@ subscriptions already logged in on that Mac.
    and `.github/codeturtle.md` with review guidelines. Both are read from the **base** branch, so a PR
    can't change its own rules.
 
+While it works, a **progress comment** on the PR shows each step (tier, each pass, merge, post), the
+model running it, any usage-limit switch and the elapsed time. It is edited every minute and deleted
+once the review is posted (a cancelled run's leftover comment is removed by the next run). The job
+log prints an elapsed-time heartbeat every 30 seconds. Typical durations: fast 1–2 min, normal
+3–5 min, full 8–12 min.
+
 It runs when a PR is opened, reopened or marked ready (not on every push, to save quota). To review
 again, comment `/review` or `/review full`. Only owners, members and collaborators can trigger it.
 Add the `codeturtle:skip` label to skip the automatic run.
@@ -79,8 +85,11 @@ python3 -m unittest discover -s tests -t .
 
 A self-hosted runner executes on your Mac with your AI logins, so:
 
-- **Private repos with trusted authors only.** Fork PRs are always skipped. Never enable this on a
-  public repo.
+- **Private repos with trusted authors only.** Fork PRs are refused by the job's `if` and again by
+  codeturtle. Never enable this on a public repo, and keep "Run workflows from fork pull requests" off
+  (the private-repo default): a fork PR may edit the workflow itself, so only that setting stops it.
+- `/review` comments from users without write access never start a job, so they can't cancel a
+  running review through `concurrency`.
 - **The PR is untrusted input.** Prompts mark PR text and code as data. Models run read-only:
   Codex `--sandbox read-only` (no network), Claude `--restricted` with only `Read,Grep,Glob` (full tier)
   or no tools, Grok `--permission-mode plan` with web search off.
