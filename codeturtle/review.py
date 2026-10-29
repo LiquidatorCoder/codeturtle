@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
 from .events import Request
 from .progress import Progress
-from .providers import LABELS, AllLimited, Call, Chain, ProviderError
+from .providers import LABELS, AllLimited, Call, Chain, ProviderError, kill_all
 from .tiers import TierDecision, combine, floor_tier, label_override
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
@@ -192,7 +193,7 @@ class Reviewer:
 
     def call(self, kind: str, tier: str, prompt: str, cwd: Path, read_repo: bool = False) -> dict:
         effort_key = "merge" if kind == "merge" else tier
-        return self.chain.run(Call(
+        data = self.chain.run(Call(
             kind=kind,
             prompt=prompt,
             schema="review",
@@ -201,6 +202,8 @@ class Reviewer:
             timeout_s=self.cfg["timeout_minutes"][effort_key] * 60,
             read_repo=read_repo,
         )).data
+        self.progress.done(kind)
+        return data
 
     def context_files(self, snapshot: Path) -> dict[str, str]:
         out, used = {}, 0
@@ -250,15 +253,26 @@ class Reviewer:
                 passes.append((f"full:part{i}", "all", diff_text, [note]))
         self.progress.plan([kind for kind, *_ in passes] + ["merge", "post"], parts=len(chunks))
 
-        summaries, findings = [], []
-        for kind, focus, diff_text, notes in passes:
+        def run_pass(spec):
+            kind, focus, diff_text, notes = spec
             prompt = prompts.review_prompt(
                 pr=self.pr, tier="full", diff_text=diff_text, focus=focus,
                 guidelines=self.guidelines, notes=notes,
             )
-            data = self.call(kind, "full", prompt, snapshot, read_repo=True)
-            summaries.append(data["summary"])
-            findings.extend(data["findings"])
+            return self.call(kind, "full", prompt, snapshot, read_repo=True)
+
+        workers = max(1, min(int(self.cfg["full_parallel"]), len(passes)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run_pass, spec) for spec in passes]
+            try:
+                results = [f.result() for f in futures]  # keeps pass order; raises the first failure
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                kill_all()  # stop sibling passes instead of waiting for them
+                raise
+        summaries = [r["summary"] for r in results]
+        findings = [item for r in results for item in r["findings"]]
 
         notes = [f"Reviewed in {len(chunks)} parts because of its size."] if len(chunks) > 1 else []
         if not findings:

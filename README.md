@@ -26,7 +26,7 @@ subscriptions already logged in on that Mac.
 |---|---|---|---|
 | Effort | low | medium | high |
 | Context | diff | diff + full changed files | diff + read-only repo snapshot the model can explore |
-| Passes | 1 | 1 | correctness, security, tests → merged (large diffs: one pass per chunk) |
+| Passes | 1 | 1 | correctness, security and tests in parallel → merged (large diffs: one pass per chunk) |
 | Reports | blocker, major | blocker, major, minor, a few nits | everything worth fixing |
 
 ## Use it in a repo
@@ -41,7 +41,7 @@ While it works, a **progress comment** on the PR shows each step (tier, each pas
 model running it, any usage-limit switch and the elapsed time. It is edited every minute and deleted
 once the review is posted (a cancelled run's leftover comment is removed by the next run). The job
 log prints an elapsed-time heartbeat every 30 seconds. Typical durations: fast 1–2 min, normal
-3–5 min, full 8–12 min.
+3–5 min, full 4–6 min (its three passes run in parallel; set `full_parallel: 1` to run them in turn).
 
 It runs when a PR is opened, reopened or marked ready (not on every push, to save quota). To review
 again, comment `/review` or `/review full`. Only owners, members and collaborators can trigger it.
@@ -67,6 +67,7 @@ default list (they are not appended).
 | `ignore_paths` | lock files, generated Dart/Go/JS, snapshots |
 | `guideline_files` | `.github/codeturtle.md`, `AGENTS.md`, `CLAUDE.md` |
 | `max_inline_comments` | 25 |
+| `full_parallel` | 3 (full-tier passes at once; 1 = one after another) |
 
 Environment on the runner: `CODETURTLE_MAX_PARALLEL` (default 1: one review at a time across all
 repos on this Mac), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific CLI.

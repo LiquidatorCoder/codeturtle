@@ -236,6 +236,9 @@ class ProgressTests(unittest.TestCase):
         pr.plan(["full:correctness", "full:security", "merge", "post"])
         pr.begin("full:correctness", "Codex (gpt-6-sol)")
         pr.begin("full:security", "Grok (grok-4.7)")
+        pr.begin("full:tests", "Codex (gpt-6-sol)")
+        self.assertEqual(sum(st["state"] == "running" for st in pr.steps), 3)  # parallel passes
+        pr.done("full:correctness")
         pr.note("Codex hit its usage limit")
         pr.skip("merge")
         text = pr.render()

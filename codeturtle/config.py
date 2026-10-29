@@ -54,6 +54,8 @@ DEFAULTS: dict = {
     # Read from the base branch and given to the models as repository review guidelines.
     "guideline_files": [".github/codeturtle.md", "AGENTS.md", "CLAUDE.md"],
     "max_inline_comments": 25,
+    # Full-tier passes (or diff parts) run at the same time; 1 runs them one after another.
+    "full_parallel": 3,
     # Characters of annotated diff per model call; larger diffs are split into chunks (full) or cut.
     "diff_budget_chars": 240_000,
     "context_budget_chars": 120_000,

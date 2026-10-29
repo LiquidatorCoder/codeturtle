@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +34,18 @@ ENV_KEEP = {
 }
 CLAUDE_TOKEN_FILE = Path("~/.codeturtle/claude-oauth-token").expanduser()
 LABELS = {"codex": "Codex", "grok": "Grok", "claude": "Claude"}
+
+# Model CLI process groups still running, so a failed parallel pass can stop its siblings.
+_ACTIVE: set[int] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def kill_all() -> None:
+    with _ACTIVE_LOCK:
+        pids = list(_ACTIVE)
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGKILL)
 
 
 class LimitHit(Exception):
@@ -94,6 +107,8 @@ def run_process(cmd: list[str], stdin: str, cwd: str, timeout_s: int) -> tuple[i
         text=True,
         start_new_session=True,
     )
+    with _ACTIVE_LOCK:
+        _ACTIVE.add(proc.pid)
     try:
         out, err = proc.communicate(stdin, timeout=timeout_s)
     except subprocess.TimeoutExpired:
@@ -105,6 +120,9 @@ def run_process(cmd: list[str], stdin: str, cwd: str, timeout_s: int) -> tuple[i
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
         raise
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE.discard(proc.pid)
     return proc.returncode, out, err
 
 
@@ -229,6 +247,7 @@ class Chain:
     used: list[str] = field(default_factory=list)
     on_attempt: callable = None  # (kind, "Codex (gpt-6-sol)") when a provider starts a call
     on_limit: callable = None  # ("Codex") when a provider hits its limit
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # passes may run in parallel
 
     def run(self, call: Call) -> Result:
         for name in self.providers:
@@ -245,14 +264,18 @@ class Chain:
                     data = RUNNERS[name](call, model)
                 except LimitHit as hit:
                     self.log(f"[{call.kind}] {hit}")
-                    self.exhausted.append(name)
-                    self.limit_notes.append(LABELS[name])
-                    if self.on_limit:
+                    with self.lock:
+                        first = name not in self.exhausted
+                        if first:
+                            self.exhausted.append(name)
+                            self.limit_notes.append(LABELS[name])
+                    if first and self.on_limit:
                         self.on_limit(LABELS[name])
                     break
                 if valid(call.schema, data):
-                    if name not in self.used:
-                        self.used.append(name)
+                    with self.lock:
+                        if name not in self.used:
+                            self.used.append(name)
                     return Result(name, model, data)
                 self.log(f"[{call.kind}] {LABELS[name]} returned unusable output")
             else:

@@ -105,9 +105,6 @@ class Progress:
 
     def begin(self, kind: str, who: str) -> None:
         with self.lock:
-            for s in self.steps:
-                if s["state"] == "running" and s["kind"] != kind:
-                    s["state"], s["t1"] = "done", time.time()
             step = self._step(kind)
             if step["state"] != "running":
                 step["t0"] = time.time()
@@ -177,8 +174,8 @@ class Progress:
             with self.lock:
                 running = [s for s in self.steps if s["state"] == "running"]
             if running:
-                s = running[0]
-                self.log(f"… {s['label']} still running ({s['who']}), {elapsed(time.time() - s['t0'])}; "
-                         f"total {elapsed(time.time() - self.started)}")
+                now = time.time()
+                parts = "; ".join(f"{s['label']} — {s['who']} {elapsed(now - s['t0'])}" for s in running)
+                self.log(f"… still running: {parts} · total {elapsed(now - self.started)}")
             if ticks % (EDIT_EVERY_S // LOG_EVERY_S) == 0:
                 self.push()
