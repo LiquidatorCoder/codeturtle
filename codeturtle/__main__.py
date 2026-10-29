@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 
 from . import TIERS
@@ -23,6 +24,8 @@ def providers_arg(value: str | None) -> list[str] | None:
 
 
 def action() -> int:
+    # A cancelled job gets SIGTERM: exit through `finally` so the progress comment is removed.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     name = os.environ["GITHUB_EVENT_NAME"]
     with open(os.environ["GITHUB_EVENT_PATH"]) as fh:
         event = json.load(fh)

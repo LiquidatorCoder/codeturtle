@@ -227,6 +227,27 @@ class PostTests(unittest.TestCase):
         self.assertIn("abcdef1", body)
 
 
+class ProgressTests(unittest.TestCase):
+    def test_render_tracks_steps(self):
+        from codeturtle.progress import MARKER, Progress
+        pr = Progress("o/r", 1, enabled=False, log=lambda m: None)
+        pr.plan(["triage"])
+        pr.tier("full", "touches auth", decided_by="rules")
+        pr.plan(["full:correctness", "full:security", "merge", "post"])
+        pr.begin("full:correctness", "Codex (gpt-6-sol)")
+        pr.begin("full:security", "Grok (grok-4.7)")
+        pr.note("Codex hit its usage limit")
+        pr.skip("merge")
+        text = pr.render()
+        self.assertTrue(text.startswith(MARKER))
+        self.assertIn("- [x] Choose review tier — rules", text)
+        self.assertIn("- [x] Correctness pass — Codex (gpt-6-sol)", text)
+        self.assertIn("**Security pass** — Grok (grok-4.7) · running", text)
+        self.assertIn("~~Merge findings~~", text)
+        self.assertIn("- [ ] Post review", text)
+        self.assertIn("> Codex hit its usage limit", text)
+
+
 class SchemaTests(unittest.TestCase):
     def test_schemas_are_strict(self):
         """Codex structured output needs every property required and no extra properties."""

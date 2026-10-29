@@ -15,6 +15,7 @@ from . import github, post, prompts
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
 from .events import Request
+from .progress import Progress
 from .providers import LABELS, AllLimited, Call, Chain, ProviderError
 from .tiers import TierDecision, combine, floor_tier, label_override
 
@@ -42,7 +43,7 @@ def group(title: str):
 
 
 @contextlib.contextmanager
-def review_slot(max_parallel: int, wait_minutes: int):
+def review_slot(max_parallel: int, wait_minutes: int, on_wait=None):
     """At most `max_parallel` reviews at once on this Mac, across every repo's runners."""
     root = Path("~/.codeturtle/slots").expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,8 @@ def review_slot(max_parallel: int, wait_minutes: int):
             raise ProviderError(f"waited {wait_minutes} min for a free review slot")
         if not announced:
             log("Waiting for another codeturtle review on this Mac to finish...")
+            if on_wait:
+                on_wait()
             announced = True
         time.sleep(10)
 
@@ -112,6 +115,7 @@ class Reviewer:
         self.providers_override = providers
         self.cfg = DEFAULTS
         self.chain: Chain | None = None
+        self.progress = Progress(req.repo, req.number, enabled=not dry_run, log=log)
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -137,7 +141,11 @@ class Reviewer:
             except json.JSONDecodeError as e:
                 raise ProviderError(f"{CONFIG_PATH} on the base branch is not valid JSON: {e}")
         providers = self.providers_override or self.cfg["providers"]
-        self.chain = Chain(providers, self.cfg["models"], log=log)
+        self.chain = Chain(
+            providers, self.cfg["models"], log=log,
+            on_attempt=self.progress.begin,
+            on_limit=lambda name: self.progress.note(f"{name} hit its usage limit, so the next reviewer took over."),
+        )
 
         self.head_sha = pr["head"]["sha"]
         self.pr = {
@@ -240,6 +248,7 @@ class Reviewer:
                 note = (f"The diff is large, so it is reviewed in {len(chunks)} parts. This is part {i}; "
                         "other files are reviewed separately but you may read them for context.")
                 passes.append((f"full:part{i}", "all", diff_text, [note]))
+        self.progress.plan([kind for kind, *_ in passes] + ["merge", "post"], parts=len(chunks))
 
         summaries, findings = [], []
         for kind, focus, diff_text, notes in passes:
@@ -253,6 +262,7 @@ class Reviewer:
 
         notes = [f"Reviewed in {len(chunks)} parts because of its size."] if len(chunks) > 1 else []
         if not findings:
+            self.progress.skip("merge")
             return Outcome(summaries[0], [], notes)
         try:
             merge_prompt = prompts.merge_prompt(pr=self.pr, summaries=summaries, findings=findings)
@@ -279,6 +289,7 @@ class Reviewer:
         )
         payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
         write_step_summary(payload["body"])
+        self.progress.begin("post", "GitHub")
         if self.dry_run:
             out = Path("out")
             out.mkdir(exist_ok=True)
@@ -311,13 +322,18 @@ class Reviewer:
             if skip:
                 log(f"Skipping: {skip}")
                 return 0
+            self.progress.start()
             max_parallel = int(os.environ.get("CODETURTLE_MAX_PARALLEL", "1"))
-            with review_slot(max_parallel, wait_minutes=90), tempfile.TemporaryDirectory(prefix="codeturtle-") as tmp:
+            on_wait = lambda: self.progress.note("Waiting for another codeturtle review on this Mac to finish.")
+            with review_slot(max_parallel, 90, on_wait), tempfile.TemporaryDirectory(prefix="codeturtle-") as tmp:
                 self.work = Path(tmp) / "empty"
                 self.work.mkdir()
                 with group("Choosing review tier"):
                     decision = self.choose_tier(self.work)
                     log(f"Tier: {decision.tier} ({decision.source}: {decision.reason})")
+                    self.progress.tier(decision.tier, decision.reason, decided_by=decision.source)
+                    if decision.tier != "full":
+                        self.progress.plan([decision.tier, "post"])
                 snapshot = None
                 if decision.tier in ("normal", "full"):
                     with group("Downloading repository snapshot"):
@@ -331,14 +347,18 @@ class Reviewer:
                 self.publish(decision, outcome)
             return 0
         except AllLimited as e:
+            self.progress.close()
             self.fail(f"Every reviewer is at its usage limit ({', '.join(self.chain.limit_notes)}). "
                       "Comment `/review` to try again once a limit resets.")
             log(str(e))
             return 1
         except (ProviderError, github.GitHubError) as e:
+            self.progress.close()
             self.fail(f"The review failed: `{e}`. See the workflow run log for details.")
             log(f"Error: {e}")
             return 1
+        finally:
+            self.progress.close()
 
 
 def write_step_summary(markdown: str) -> None:

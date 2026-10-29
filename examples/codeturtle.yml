@@ -22,10 +22,15 @@ permissions:
 
 jobs:
   review:
-    # Comments only start a job when they are a /review command on a PR.
+    # Never start on a fork PR, and only start on a /review comment from someone with write access,
+    # so an outside comment can't occupy the runner or cancel a running review via `concurrency`.
     if: >-
-      github.event_name != 'issue_comment' ||
-      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/review') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, macOS, ARM64, mac-ci]
     timeout-minutes: 120
     concurrency:

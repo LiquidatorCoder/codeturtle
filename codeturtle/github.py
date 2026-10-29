@@ -64,9 +64,24 @@ def post_review(repo: str, number: int, payload: dict) -> dict:
                          stdin=json.dumps(payload)))
 
 
-def post_comment(repo: str, number: int, body: str) -> None:
-    gh(["api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", "--input", "-"],
+def post_comment(repo: str, number: int, body: str) -> int:
+    out = gh(["api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", "--input", "-"],
+             stdin=json.dumps({"body": body}))
+    return int(json.loads(out)["id"])
+
+
+def edit_comment(repo: str, comment_id: int, body: str) -> None:
+    gh(["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{comment_id}", "--input", "-"],
        stdin=json.dumps({"body": body}))
+
+
+def delete_comment(repo: str, comment_id: int) -> None:
+    gh(["api", "-X", "DELETE", f"repos/{repo}/issues/comments/{comment_id}"])
+
+
+def list_comments(repo: str, number: int) -> list[dict]:
+    pages = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
+    return [item for page in pages for item in page]
 
 
 def react(repo: str, comment_id: int, content: str) -> None:

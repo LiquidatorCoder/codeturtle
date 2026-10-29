@@ -6,6 +6,7 @@ crash, unusable output) stops the review, so a broken setup is never hidden behi
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -99,6 +100,11 @@ def run_process(cmd: list[str], stdin: str, cwd: str, timeout_s: int) -> tuple[i
         os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
         raise ProviderError(f"{Path(cmd[0]).name} timed out after {timeout_s // 60} min")
+    except BaseException:
+        # Job cancelled (SIGTERM/SIGINT): don't leave the model CLI running in its own session.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        raise
     return proc.returncode, out, err
 
 
@@ -221,6 +227,8 @@ class Chain:
     exhausted: list[str] = field(default_factory=list)
     limit_notes: list[str] = field(default_factory=list)
     used: list[str] = field(default_factory=list)
+    on_attempt: callable = None  # (kind, "Codex (gpt-6-sol)") when a provider starts a call
+    on_limit: callable = None  # ("Codex") when a provider hits its limit
 
     def run(self, call: Call) -> Result:
         for name in self.providers:
@@ -231,12 +239,16 @@ class Chain:
             model = self.models[name]
             for attempt in (1, 2):
                 self.log(f"[{call.kind}] {LABELS[name]} ({model}, effort {call.effort}) attempt {attempt}")
+                if self.on_attempt:
+                    self.on_attempt(call.kind, f"{LABELS[name]} ({model})")
                 try:
                     data = RUNNERS[name](call, model)
                 except LimitHit as hit:
                     self.log(f"[{call.kind}] {hit}")
                     self.exhausted.append(name)
                     self.limit_notes.append(LABELS[name])
+                    if self.on_limit:
+                        self.on_limit(LABELS[name])
                     break
                 if valid(call.schema, data):
                     if name not in self.used:
