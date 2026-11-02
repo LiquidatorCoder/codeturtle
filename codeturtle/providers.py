@@ -23,7 +23,8 @@ SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
 LIMIT_RE = re.compile(
     r"usage[ _-]?limit|rate[ _-]?limit|quota|credit[ _-]?limit|out of credits|insufficient credits"
     r"|too many requests|\b429\b|limit reached|hit your (?:usage )?limit|limit exceeded"
-    r"|resource[ _-]?exhausted|try again (?:at|in|later)",
+    r"|resource[ _-]?exhausted|try again (?:at|in|later)"
+    r"|payment required|balance exhausted|insufficient balance",
     re.IGNORECASE,
 )
 

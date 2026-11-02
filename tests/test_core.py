@@ -20,6 +20,9 @@ PATCH = """@@ -1,4 +1,5 @@
 +    return b
      pass"""
 
+GROK_402 = ('Error: Internal error: { "message": "API error (status 402 Payment Required): '
+            'Grok Build usage balance exhausted", "http_status": 402 }')
+
 
 def fc(path, add=1, delete=0, patch=PATCH, status="modified"):
     return FileChange(path, status, add, delete, patch)
@@ -134,10 +137,22 @@ class ProviderTests(unittest.TestCase):
 
     def test_limit_detection(self):
         for text in ["You've hit your usage limit. Try again at 5pm", "HTTP 429 Too Many Requests",
-                     "rate_limit_error", "Credit limit reached"]:
+                     "rate_limit_error", "Credit limit reached", GROK_402,
+                     "Insufficient balance on this account"]:
             with self.assertRaises(providers.LimitHit):
                 providers.check_limit("grok", text)
         providers.check_limit("grok", "authentication failed: invalid token")
+        providers.check_limit("grok", "could not fetch PR #402")
+
+    def test_grok_out_of_balance_falls_through_to_claude(self):
+        call = providers.Call("fast", "p", "review", "/tmp", "low", 60)
+        ok = {"summary": "s", "findings": []}
+        with mock.patch.object(providers, "find_bin", return_value="grok"), \
+                mock.patch.object(providers, "run_process", return_value=(1, "", GROK_402)), \
+                mock.patch.dict(providers.RUNNERS, {"grok": providers.run_grok, "claude": lambda c, m: ok}):
+            chain = providers.Chain(["grok", "claude"], DEFAULTS["models"], log=lambda m: None)
+            self.assertEqual(chain.run(call).provider, "claude")
+            self.assertEqual(chain.limit_notes, ["Grok"])
 
     def test_env_drops_github_secrets(self):
         with mock.patch.dict("os.environ", {"GH_TOKEN": "x", "GITHUB_TOKEN": "y", "ACTIONS_RUNTIME_TOKEN": "z", "HOME": "/h"}):
