@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Self-hosted runners: never run code from a fork PR on the Mac.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, mac-ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Python version
+        run: python3 --version
+
+      - name: Compile
+        run: python3 -m compileall -q codeturtle tests
+
+      - name: Check JSON files
+        run: |
+          for f in schemas/*.json examples/*.json; do
+            python3 -m json.tool "$f" > /dev/null || { echo "invalid JSON: $f"; exit 1; }
+          done
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -t . -v
