@@ -15,7 +15,8 @@ DEFAULTS: dict = {
     # Tried in order; the next one is used only when the previous one hits its usage limit.
     "providers": ["codex", "grok", "claude"],
     "models": {"codex": "gpt-6-sol", "grok": "grok-4.7", "claude": "claude-opus-5-5"},
-    "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "medium", "verify": "medium"},
+    # The merge step only de-duplicates, so it runs at low effort.
+    "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "low", "verify": "medium"},
     "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10, "verify": 15},
     # Security on every review (security.py, adapted from Cloudflare's security-audit skill).
     "security": {
@@ -49,8 +50,19 @@ DEFAULTS: dict = {
         ],
         # A PR whose changed files ALL match these gets at least a fast review.
         "fast_paths": ["**/*.md", "**/*.txt", "docs/**", "**/*.png", "**/*.jpg", "**/*.svg", "LICENSE*"],
+        # Tests and fixtures: reviewed, but they don't count toward the size thresholds below.
+        "test_paths": [
+            "**/test/**", "**/tests/**", "**/__tests__/**", "**/spec/**", "**/integration_test/**",
+            "**/testdata/**", "**/fixtures/**", "**/__snapshots__/**", "**/*_test.*", "**/*.test.*",
+            "**/*.spec.*", "**/*_spec.*", "**/test_*.py", "**/*Tests.swift", "**/*Test.swift",
+            "**/*Test.kt", "**/*Tests.kt", "**/*Test.java", "**/*UITests/**", "**/RunnerTests/**",
+        ],
+        # Changed production lines (not tests, docs, assets or generated files).
         "full_if_lines_over": 800,
         "fast_if_lines_under": 40,
+        # When a full review is due only to sensitive paths, those files get the full passes and
+        # the rest one normal-depth pass, instead of three high-effort passes over everything.
+        "split_full": True,
     },
     # Left out of the diff the models see (still counted in stats and listed by name).
     "ignore_paths": [

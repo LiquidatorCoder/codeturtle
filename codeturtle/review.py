@@ -20,7 +20,7 @@ from .events import Request
 from .progress import Progress
 from .providers import AllLimited, Call, Chain, ProviderError, Unavailable, kill_all, label
 from .result import ResultWriter, finding_id, iso, with_ids
-from .tiers import TierDecision, combine, floor_tier, label_override, raise_floor
+from .tiers import TierDecision, combine, floor_tier, is_production, is_sensitive, label_override, raise_floor
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
 AGENT_CONFIG_FILES = {
@@ -310,10 +310,10 @@ class Reviewer:
                 sanitize_snapshot(self.snapshot)
         return self.snapshot
 
-    def context_files(self, snapshot: Path) -> dict[str, str]:
+    def context_files(self, snapshot: Path, files: list[FileChange] | None = None) -> dict[str, str]:
         out, used = {}, 0
         budget = self.cfg["context_budget_chars"]
-        for f in sorted(self.files, key=lambda f: f.changes, reverse=True):
+        for f in sorted(self.files if files is None else files, key=lambda f: f.changes, reverse=True):
             if f.ignored or f.status == "removed":
                 continue
             path = snapshot / f.path
@@ -354,46 +354,82 @@ class Reviewer:
         findings = self.check_security(data["findings"], results.get("security"), "security", tier, snapshot)
         return Outcome(data["summary"], findings, notes)
 
-    def review_full(self, snapshot: Path) -> Outcome:
-        chunks = chunk_files(self.files, self.cfg["diff_budget_chars"])
-        passes = []  # (kind, prompt, schema, optional)
+    def risk_split(self, decision: TierDecision) -> tuple[list[FileChange], list[FileChange]]:
+        """(files for the full passes, files for a normal-depth pass). The rules chose `full` only
+        because of sensitive paths: those files get the full passes and the rest a normal one. A
+        requested or triaged full review, or one the size rule alone would force, covers everything."""
+        rules = self.cfg["tiers"]
+        reviewed = [f for f in self.files if not f.ignored]
+        production_lines = sum(f.changes for f in reviewed if is_production(f, rules))
+        if (not rules.get("split_full", True) or decision.source not in ("rules", "min_tier")
+                or production_lines > rules["full_if_lines_over"]):
+            return self.files, []
+        rest = [f for f in reviewed if not is_sensitive(f, rules)]
+        full = [f for f in self.files if f not in rest]  # sensitive files, plus generated ones as headers
+        if not rest or not any(is_sensitive(f, rules) for f in full):
+            return self.files, []
+        return full, rest
+
+    def review_full(self, snapshot: Path, decision: TierDecision) -> Outcome:
+        budget = self.cfg["diff_budget_chars"]
+        full_files, rest = self.risk_split(decision)
+        chunks = chunk_files(full_files, budget)
+        passes = []  # (kind, prompt, schema, optional, effort, cwd, read_repo)
+        sensitive = len([f for f in full_files if not f.ignored])
+        split_note = [f"Only {sensitive} of the changed files touch sensitive paths, and this pass reviews "
+                      f"those. The other {len(rest)} files get a normal-depth review separately; you may "
+                      "read them for context."] if rest else []
 
         def review_pass(kind, focus, diff_text, notes):
             prompt = prompts.review_prompt(pr=self.pr, tier="full", diff_text=diff_text, focus=focus,
                                            guidelines=self.guidelines, notes=notes)
-            passes.append((kind, prompt, "review", False))
+            passes.append((kind, prompt, "review", False, "full", snapshot, True))
 
         def security_pass(diff_text, notes):
             if self.sec.dedicated:
                 prompt = security.pass_prompt(pr=self.pr, depth="repo", diff_text=diff_text, companions=self.companions,
                                               notes=self.security_notes, extra=notes)
-                passes.append(("full:security", prompt, "security", True))
+                passes.append(("full:security", prompt, "security", True, "full", snapshot, True))
 
         if len(chunks) == 1:
-            diff_text, _ = render_diff(chunks[0], self.cfg["diff_budget_chars"])
-            review_pass("full:correctness", "correctness", diff_text, [])
-            security_pass(diff_text, [])
-            review_pass("full:tests", "tests", diff_text, [])
+            diff_text, _ = render_diff(chunks[0], budget)
+            review_pass("full:correctness", "correctness", diff_text, split_note)
+            # The security pass always sees the whole change, sensitive files first.
+            security_pass(*(self.security_diff() if rest else (diff_text, [])))
+            review_pass("full:tests", "tests", diff_text, split_note)
         else:
             for i, chunk in enumerate(chunks, 1):
-                diff_text, _ = render_diff(chunk, self.cfg["diff_budget_chars"])
+                diff_text, _ = render_diff(chunk, budget)
                 note = (f"The diff is large, so it is reviewed in {len(chunks)} parts. This is part {i}; "
                         "other files are reviewed separately but you may read them for context.")
-                review_pass(f"full:part{i}", "all", diff_text, [note])
+                review_pass(f"full:part{i}", "all", diff_text, [note] + split_note)
             security_pass(*self.security_diff())
+        rest_chunks = chunk_files(rest, budget) if rest else []
+        for i, chunk in enumerate(rest_chunks, 1):
+            diff_text, _ = render_diff(chunk, budget)
+            note = ("These files don't touch sensitive paths, so they get a normal-depth review; the sensitive "
+                    "files get a full review separately."
+                    + (f" This is part {i} of {len(rest_chunks)}." if len(rest_chunks) > 1 else ""))
+            prompt = prompts.review_prompt(pr=self.pr, tier="normal", diff_text=diff_text, guidelines=self.guidelines,
+                                           context_files=self.context_files(snapshot, chunk), notes=[note])
+            kind = "full:rest" if len(rest_chunks) == 1 else f"full:rest{i}"
+            passes.append((kind, prompt, "review", False, "normal", self.work, False))
         self.progress.plan([kind for kind, *_ in passes] + ["verify", "merge", "post"], parts=len(chunks))
 
         results = self.run_jobs([
-            (kind, (lambda kind=kind, prompt=prompt, schema=schema:
-                    self.call(kind, "full", prompt, snapshot, read_repo=True, schema=schema)), optional)
-            for kind, prompt, schema, optional in passes
+            (kind, (lambda kind=kind, prompt=prompt, schema=schema, effort=effort, cwd=cwd, read=read:
+                    self.call(kind, effort, prompt, cwd, read_repo=read, schema=schema)), optional)
+            for kind, prompt, schema, optional, effort, cwd, read in passes
         ])
-        reviews = [results[kind] for kind, _, schema, _ in passes if schema == "review"]
+        reviews = [results[kind] for kind, _, schema, *_ in passes if schema == "review"]
         summaries = [r["summary"] for r in reviews]
         findings = [item for r in reviews for item in r["findings"]]
         findings = self.check_security(findings, results.get("full:security"), "full:security", "full", snapshot)
 
         notes = [f"Reviewed in {len(chunks)} parts because of its size."] if len(chunks) > 1 else []
+        if rest:
+            notes.append(f"Full review on the {sensitive} files that touch sensitive paths; normal-depth "
+                         f"review on the other {len(rest)}.")
         if not findings:
             self.progress.skip("merge")
             return Outcome(summaries[0], [], notes)
@@ -586,7 +622,7 @@ class Reviewer:
                 snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") else None
                 with group(f"{decision.tier.capitalize()} review"):
                     if decision.tier == "full":
-                        outcome = self.review_full(snapshot)
+                        outcome = self.review_full(snapshot, decision)
                     else:
                         outcome = self.review_single(decision.tier, self.work, snapshot)
                 self.publish(decision, outcome)

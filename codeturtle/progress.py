@@ -21,6 +21,9 @@ def elapsed(seconds: float) -> str:
 def step_label(kind: str, parts: int = 0) -> str:
     if kind.startswith("full:part"):
         return f"Part {kind[len('full:part'):]} of {parts}"
+    if kind.startswith("full:rest"):
+        n = kind[len("full:rest"):]
+        return "Normal pass, other files" + (f" (part {n})" if n else "")
     return {
         "triage": "Choose review tier",
         "fast": "Fast review",
