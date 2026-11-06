@@ -11,6 +11,9 @@ subscriptions already logged in on that Mac.
 - **Health-checked:** every review first checks that each CLI is installed and logged in, and names
   a broken backup on the PR before it is needed (see [Provider health](#provider-health-12)).
 - **Three tiers:** `fast`, `normal`, `full`. Picked automatically, or forced with a label or comment.
+- **Security on every review:** a dedicated security pass and an independent verifier, using rules
+  adapted from Cloudflare's [security-audit skill](https://github.com/cloudflare/security-audit-skill)
+  (see [Security review](#security-review-13)).
 - **Comment-only:** posts one PR review (`COMMENT`) with inline comments. It never blocks a merge.
 - **No secrets in GitHub:** the models run with the logins in `~/.codex`, `~/.grok` and Claude's
   own login. The workflow only uses the default `GITHUB_TOKEN`.
@@ -31,15 +34,19 @@ subscriptions already logged in on that Mac.
 | Effort | low | medium | high |
 | Context | diff | diff + full changed files | diff + read-only repo snapshot the model can explore |
 | Passes | 1 | 1 | correctness, security and tests in parallel → merged (large diffs: one pass per chunk) |
+| Security | dedicated pass on the diff | dedicated pass that reads the repo | dedicated pass that reads the repo |
 | Reports | blocker, major | blocker, major, minor, a few nits | everything worth fixing |
+
+Every tier also sends its security findings to an independent verifier before posting them.
 
 ## Use it in a repo
 
 1. Put the repo on the Mac runners: `macci add LiquidatorCoder/<repo>`.
 2. Copy [`examples/codeturtle.yml`](examples/codeturtle.yml) to `.github/workflows/codeturtle.yml`.
-3. Optional: add `.github/codeturtle.json` (see [`examples/codeturtle.json`](examples/codeturtle.json))
-   and `.github/codeturtle.md` with review guidelines. Both are read from the **base** branch, so a PR
-   can't change its own rules.
+3. Optional: add `.github/codeturtle.json` (see [`examples/codeturtle.json`](examples/codeturtle.json)),
+   `.github/codeturtle.md` with review guidelines and `.github/codeturtle-security.md` with the repo's
+   threat model (see [Security review](#security-review-13)). All are read from the **base** branch,
+   so a PR can't change its own rules.
 
 While it works, a **progress comment** on the PR shows each step (tier, each pass, merge, post), the
 model running it, any usage-limit switch and the elapsed time. It is edited every minute and deleted
@@ -53,6 +60,48 @@ Add the `codeturtle:skip` label to skip the automatic run.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
+
+## Security review (1.3)
+
+The security rules are adapted for PR review from Cloudflare's MIT-licensed
+[security-audit skill](https://github.com/cloudflare/security-audit-skill) (notice in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)). The skill audits a whole repository in six phases
+(map, hunt, challenge, record, verify, report). A review has one diff and a few model calls, so
+[`codeturtle/security.py`](codeturtle/security.py) keeps what carries over:
+
+- **The evidence bar.** A security finding names the lower-trust actor and what they control, the
+  control that fails, the boundary crossed and the concrete impact. Missing best practices,
+  defense-in-depth gaps behind a working control, self-impact and guessed deployment behaviour are
+  not findings. Every review prompt carries this bar.
+- **A dedicated security pass on every review** (except docs- or assets-only changes), in parallel
+  with the main pass. It maps the entry points and trust boundaries the change touches, hunts with the
+  skill's attack classes (injection, access control, files and SSRF, secrets and crypto, business
+  logic, feature abuse, obvious exposures), and challenges each candidate before reporting it. Fast
+  reviews give it the diff; normal and full reviews let it read the repository snapshot.
+- **Domain checks picked from the changed files:** AI and agents, HTTP and identity, browser code,
+  supply chain and CI, cloud and deployment, RPC and webhooks, resource exhaustion and spend, data
+  isolation, mobile and local IPC, memory safety (at most `max_companions`, default 4).
+- **An independent verifier.** Each security candidate, including security findings from the other
+  passes, goes to a fresh call that reads the snapshot and tries to refute it. Its verdicts:
+  - `confirmed`: posted as a finding. Severity comes from the demonstrated impact (critical or high →
+    blocker, medium → major, low → minor).
+  - `needs_validation`: the path is real but one fact outside the repository decides it, such as a
+    proxy, identity provider or cloud setting. It is listed under "Security leads that need
+    validation" with that fact, has no severity, and is not in `findings`, so nothing auto-fixes it.
+  - `rejected`: dropped, and counted in the review's security line.
+  If the verifier can't run, the candidates are posted unverified and the review says so. If the
+  security pass fails, the review is still posted, with a note.
+- **The repo's threat model.** `.github/codeturtle-security.md` (from the base branch) tells the
+  security pass and the verifier what the trust boundaries are, for example "tenants never share
+  rows" or "only the billing service may call /internal".
+
+Each review body has a line such as
+`Security: dedicated pass (HTTP, sessions and identity) · 1 confirmed · 1 need validation · 2 rejected by an independent check`,
+and `result.json` has a `security` object with the same counts and the leads.
+
+**Cost:** fast and normal reviews make one extra call (the security pass), plus one verifier call
+when there are security candidates. Full reviews already had a security pass; they add the verifier
+call. A fast review with security candidates also downloads the snapshot for the verifier.
 
 ## Provider health (1.2)
 
@@ -84,8 +133,9 @@ which providers ran (and how many model calls), the summary, every finding with 
 (`ct-` + 12 hex of path, line, severity, title) and where it was posted, `findings_total` and
 per-severity `counts`, and the posted review's id/URL. Since 1.2 it also has `retry_at` (for
 `usage_limited`: the earliest reset a provider reported) and, under `reviewers`, `limits`,
-`unavailable` and the health check's result per provider; these are additive, so `schema_version`
-stays 1. It is redacted like the PR review and never holds a token, an environment variable, a
+`unavailable` and the health check's result per provider. Since 1.3, `security` holds the security
+check's counts, whether it was verified, and its `needs_validation` leads (never in `findings`).
+These are additive, so `schema_version` stays 1. It is redacted like the PR review and never holds a token, an environment variable, a
 prompt or model reasoning. The PR review and inline
 comments are unchanged; the artifact is for tools.
 
@@ -115,8 +165,12 @@ default list (they are not appended).
 |---|---|
 | `providers` | `["codex", "grok", "claude"]` |
 | `models` | `codex: gpt-6-sol`, `grok: grok-4.7`, `claude: claude-opus-5-5` |
-| `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `medium` |
-| `timeout_minutes` | triage 5, fast 10, normal 20, full 40 (per pass), merge 10 |
+| `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `medium`, verify `medium` |
+| `timeout_minutes` | triage 5, fast 10, normal 20, full 40 (per pass), merge 10, verify 15 |
+| `security.pass` | `auto` (dedicated pass unless only docs or assets changed), `always` or `off` |
+| `security.verify` | `true` (an independent call tries to refute each security finding before it is posted) |
+| `security.rules_files` | `[".github/codeturtle-security.md"]` (the repo's threat model, from the base branch) |
+| `security.max_companions` | 4 (domain checks picked from the changed files) |
 | `limit_wait_minutes` | 30 (when every reviewer is out, wait this long at most for a usage limit to reset; 0 fails at once) |
 | `tiers.full_paths` | auth, security, payments, billing, migrations, SQL, workflows, Dockerfile, plist/manifest |
 | `tiers.fast_paths` | Markdown, text, docs, images, LICENSE |
