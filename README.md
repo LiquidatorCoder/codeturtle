@@ -4,8 +4,12 @@ AI pull request review that runs on your self-hosted Mac runner, using the CLIs 
 subscriptions already logged in on that Mac.
 
 - **Fallback chain:** Codex (`gpt-6-sol`) → Grok (`grok-4.7`) → Claude (`claude-opus-5-5`).
-  The next reviewer is used **only** when the previous one reports a usage or rate limit. Any other
-  failure (auth, timeout, crash, unusable output) stops the review and says so on the PR.
+  The next reviewer takes over when one hits a usage or rate limit, isn't installed or logged in on
+  the runner, or keeps failing with a temporary error (model at capacity, server error, network
+  drop) after two retries. Each switch is shown on the PR. Any other failure (timeout, crash,
+  unusable output) stops the review and says so on the PR.
+- **Health-checked:** every review first checks that each CLI is installed and logged in, and names
+  a broken backup on the PR before it is needed (see [Provider health](#provider-health-12)).
 - **Three tiers:** `fast`, `normal`, `full`. Picked automatically, or forced with a label or comment.
 - **Comment-only:** posts one PR review (`COMMENT`) with inline comments. It never blocks a merge.
 - **No secrets in GitHub:** the models run with the logins in `~/.codex`, `~/.grok` and Claude's
@@ -50,6 +54,26 @@ Add the `codeturtle:skip` label to skip the automatic run.
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
 
+## Provider health (1.2)
+
+- **Checked before every review.** Each CLI's own status command (`codex login status`,
+  `claude auth status`, `grok models`: no model call, no quota) runs in the reviews' environment.
+  A provider that isn't installed or logged in is tried last, and the progress comment, the review
+  and `result.json` name it with the fix. A broken backup shows up on the next PR, not on the day
+  the main reviewer runs out.
+- **Usage limits are remembered.** The reset time in a limit message ("try again at 7:39 PM",
+  "try again in 20 seconds") is saved in `~/.codeturtle/limits.json`, and until then later reviews
+  try that provider last instead of hitting the limit again (30 minutes when no time is given,
+  never more than 12 hours). The review footer shows `usage limit: Codex (until 7:39 PM IST)`.
+- **Short limits are waited out.** When every provider is out and one resets within
+  `limit_wait_minutes` (default 30), the review waits for it instead of failing. Otherwise the
+  failure comment and `result.json` (`retry_at`) say when to try again.
+- **GitHub blips are retried** (after 5 s, 15 s and 45 s): reads and idempotent writes on network
+  or 5xx errors, other writes only when the request never left the Mac.
+- `python3 -m codeturtle doctor` runs the same check from a terminal and exits 1 when a provider
+  can't review. It sees your terminal's login session; the check inside each review shows what the
+  runner sees.
+
 ## Machine-readable result (1.1)
 
 Every run uploads one artifact, `codeturtle-result-attempt-<run_attempt>`, holding `result.json`
@@ -58,8 +82,11 @@ repository, PR number, base/head refs and the **reviewed head SHA**, the run id/
 caller's `request_id`, `status` (`completed`, `failed`, `usage_limited`, `skipped`), the tier and why,
 which providers ran (and how many model calls), the summary, every finding with a stable id
 (`ct-` + 12 hex of path, line, severity, title) and where it was posted, `findings_total` and
-per-severity `counts`, and the posted review's id/URL. It is redacted like the PR review and never
-holds a token, an environment variable, a prompt or model reasoning. The PR review and inline
+per-severity `counts`, and the posted review's id/URL. Since 1.2 it also has `retry_at` (for
+`usage_limited`: the earliest reset a provider reported) and, under `reviewers`, `limits`,
+`unavailable` and the health check's result per provider; these are additive, so `schema_version`
+stays 1. It is redacted like the PR review and never holds a token, an environment variable, a
+prompt or model reasoning. The PR review and inline
 comments are unchanged; the artifact is for tools.
 
 A tool that consumes it must first check through the GitHub API that the artifact belongs to a
@@ -90,6 +117,7 @@ default list (they are not appended).
 | `models` | `codex: gpt-6-sol`, `grok: grok-4.7`, `claude: claude-opus-5-5` |
 | `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `medium` |
 | `timeout_minutes` | triage 5, fast 10, normal 20, full 40 (per pass), merge 10 |
+| `limit_wait_minutes` | 30 (when every reviewer is out, wait this long at most for a usage limit to reset; 0 fails at once) |
 | `tiers.full_paths` | auth, security, payments, billing, migrations, SQL, workflows, Dockerfile, plist/manifest |
 | `tiers.fast_paths` | Markdown, text, docs, images, LICENSE |
 | `tiers.full_if_lines_over` / `fast_if_lines_under` | 800 / 40 |
@@ -99,13 +127,15 @@ default list (they are not appended).
 | `full_parallel` | 3 (full-tier passes at once; 1 = one after another) |
 
 Environment on the runner: `CODETURTLE_MAX_PARALLEL` (default 1: one review at a time across all
-repos on this Mac), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific CLI.
+repos on this Mac), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific CLI,
+`CODETURTLE_HOME` (default `~/.codeturtle`: review slots, `limits.json`, the Claude token file).
 
 ## Run it locally
 
 ```bash
 python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --dry-run
 python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --tier full --providers grok,claude --dry-run
+python3 -m codeturtle doctor
 python3 -m unittest discover -s tests -t .
 ```
 

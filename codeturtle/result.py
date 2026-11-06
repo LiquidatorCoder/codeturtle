@@ -86,6 +86,7 @@ class ResultWriter:
         self.notes: list[str] = []
         self.review: dict | None = None
         self.reviewers: dict = {"providers_used": [], "models": {}, "usage_limited": [], "calls": 0}
+        self.retry_at: str | None = None  # status usage_limited: earliest reported limit reset
 
     def set_pr(self, raw: dict) -> None:
         base, head = raw.get("base") or {}, raw.get("head") or {}
@@ -112,6 +113,7 @@ class ResultWriter:
             "status": status,  # completed | failed | usage_limited | skipped
             "error": redact(error)[:1000] if error else None,
             "skip_reason": skip_reason,
+            "retry_at": self.retry_at,
             "tier": self.tier,
             "reviewers": self.reviewers,
             "summary": redact(self.summary),
