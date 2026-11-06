@@ -40,6 +40,7 @@ def action() -> int:
             pr_input=os.environ.get("CODETURTLE_PR", ""),
             min_tier_input=os.environ.get("CODETURTLE_MIN_TIER", ""),
             request_id_input=os.environ.get("CODETURTLE_REQUEST_ID", ""),
+            fresh_input=os.environ.get("CODETURTLE_FRESH", ""),
         )
     except BadRequest as e:
         log(f"Bad request: {e}")
@@ -65,6 +66,7 @@ def main(argv: list[str]) -> int:
     review.add_argument("--min-tier", choices=TIERS, help="lowest tier allowed (raises the rule floor)")
     review.add_argument("--providers", help="comma-separated order, e.g. grok,claude")
     review.add_argument("--dry-run", action="store_true", help="write the review to out/ instead of posting")
+    review.add_argument("--fresh", action="store_true", help="review the whole PR, not just what changed since the last review")
     check = sub.add_parser("doctor", help="check that every model CLI is installed and logged in (exit 1 if not)")
     check.add_argument("--providers", help="comma-separated, default: codex,grok,claude")
     stats = sub.add_parser("stats", help="how often findings get addressed, by severity, category, tier and version")
@@ -79,7 +81,7 @@ def main(argv: list[str]) -> int:
     if args.command == "stats":
         from .stats import main as stats_main
         return stats_main(args.repo, max(1, min(args.prs, 100)), args.json)
-    req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier)
+    req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier, fresh=args.fresh)
     return Reviewer(req, providers_arg(args.providers), args.dry_run).run()
 
 

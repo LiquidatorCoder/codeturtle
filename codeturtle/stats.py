@@ -18,7 +18,7 @@ from . import github
 
 BOT_LOGINS = {"github-actions", "github-actions[bot]"}
 COMMENT_RE = re.compile(r"^\S+ \*\*(Blocker|Major|Minor|Nit)\*\* · ([\w-]+) — \*\*(.+?)\*\*", re.S)
-TIER_RE = re.compile(r"### 🐢 codeturtle · (Fast|Normal|Full) review")
+TIER_RE = re.compile(r"### 🐢 codeturtle · (Fast|Normal|Full) (?:follow-up )?review")
 VERSION_RE = re.compile(r"codeturtle v(\d+\.\d+\.\d+)")
 SEVERITIES = ["blocker", "major", "minor", "nit"]
 

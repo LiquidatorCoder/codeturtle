@@ -4,12 +4,12 @@ blockers and majors, fix-rate stats, and incremental follow-up reviews."""
 import unittest
 from unittest import mock
 
-from codeturtle import security, stats, verify
+from codeturtle import followup, security, stats, verify
 from codeturtle.config import DEFAULTS
-from codeturtle.events import Request
+from codeturtle.events import Request, from_event
 from codeturtle.providers import Chain
 from codeturtle.review import Reviewer
-from codeturtle.tiers import TierDecision, floor_tier
+from codeturtle.tiers import TierDecision, floor_tier, parse_command, wants_fresh
 
 from tests.fakes import OK, FakeRun, api_file, change, finding
 
@@ -162,6 +162,114 @@ class StatsTests(unittest.TestCase):
         text = stats.render(agg, ["o/r"], 10)
         self.assertIn("Inline findings: 3 on 1 PRs · addressed 2 (67%)", text)
         self.assertIn("tests", text)
+
+
+PREV = "c" * 40
+F1 = {"id": "ct-111111111111", "severity": "major", "category": "security", "path": "api/search.py", "line": 2,
+      "title": "SQL built from input", "body": "b1"}
+F2 = {"id": "ct-222222222222", "severity": "minor", "category": "tests", "path": "lib/other.py", "line": 5,
+      "title": "No test for empty input", "body": "b2"}
+
+
+def bot_review(sha=PREV, findings=(F1, F2), login="github-actions[bot]"):
+    return {"user": {"login": login}, "body": "### 🐢 codeturtle · Normal review\n\n"
+            + followup.encode_state(sha, list(findings))}
+
+
+class FollowupStateTests(unittest.TestCase):
+    def test_state_round_trip_and_trust(self):
+        state = followup.latest_state([bot_review()])
+        self.assertEqual(state["sha"], PREV)
+        self.assertEqual([f["id"] for f in state["findings"]], [F1["id"], F2["id"]])
+        # Only codeturtle's own bot can leave a state; anyone else's marker is ignored.
+        self.assertIsNone(followup.latest_state([bot_review(login="dev")]))
+        self.assertIsNone(followup.decode_state("<!-- codeturtle:state not-base64!! -->"))
+        newer = bot_review(sha="d" * 40, findings=[F2])
+        self.assertEqual(followup.latest_state([bot_review(), newer])["sha"], "d" * 40)
+
+    def test_fresh_command(self):
+        self.assertEqual(parse_command("/review fresh"), (True, None))
+        self.assertEqual(parse_command("/review fresh FULL"), (True, "full"))
+        self.assertTrue(wants_fresh("/review fresh full"))
+        self.assertFalse(wants_fresh("/review full"))
+        event = {"action": "created", "issue": {"number": 4, "pull_request": {}},
+                 "comment": {"id": 9, "body": "/review fresh", "author_association": "OWNER"}}
+        self.assertTrue(from_event("issue_comment", event, "o/r")[0].fresh)
+
+    def test_plan_sorts_earlier_findings(self):
+        plan = followup.Plan(since=PREV, previous=[F1, F2], delta_paths={"api/search.py"})
+        self.assertEqual(plan.to_check(), [F1])
+        plan.apply({F1["id"]: {"id": F1["id"], "status": "fixed", "line": 0, "note": "now bound"}})
+        self.assertEqual(([f["id"] for f in plan.fixed], [f["id"] for f in plan.open]), ([F1["id"]], [F2["id"]]))
+        unchecked = followup.Plan(since=PREV, previous=[F1, F2], delta_paths={"api/search.py"})
+        unchecked.apply(None)  # the re-check failed: everything stays open
+        self.assertEqual(len(unchecked.open), 2)
+        moved = followup.Plan(since=PREV, previous=[F1], delta_paths={"api/search.py"})
+        moved.apply({F1["id"]: {"id": F1["id"], "status": "open", "line": 7, "note": "still built by hand"}})
+        self.assertEqual(moved.open[0]["line"], 7)
+        self.assertEqual(moved.drop_repeats([finding("SQL built from input", line=40), finding("Other", line=20)]),
+                         [finding("Other", line=20)])
+
+
+class FollowupFlowTests(unittest.TestCase):
+    def answer(self, call, provider):
+        if call.schema == "followup":
+            return {"summary": "One fixed.", "previous": [
+                {"id": F1["id"], "status": "fixed", "line": 0, "note": "the query is parameterized"}]}
+        if call.schema == "security":
+            return {"summary": "s", "candidates": []}
+        if call.schema == "verify":
+            return {"verdicts": []}
+        return {"summary": "Adds a timeout.", "findings": [finding("Timeout is never cancelled", "minor", line=3)]}
+
+    def gh(self, status="ahead"):
+        return {
+            "get_files": [api_file("api/search.py", "q = 1\nfixed = True"), api_file("lib/other.py", "x = 1")],
+            "list_reviews": [bot_review()],
+            "compare": {"status": status, "files": [api_file("api/search.py", "fixed = True")]},
+            "review_threads": [{"id": "T1", "isResolved": False, "comments": {"nodes": [
+                {"databaseId": 99, "body": "🔴 **Major** ...\n\n" + followup.FINDING_MARK.format(id=F1["id"])}]}}],
+        }
+
+    def test_follow_up_reviews_the_delta_and_resolves_fixed_threads(self):
+        run = FakeRun(self)
+        code, payload, result = run.run(None, self.answer, request=Request("o/r", 1, "dispatch", "normal"),
+                                        gh=self.gh())
+        self.assertEqual(code, 0)
+        self.assertIn("followup", run.kinds())
+        diff = run.call("normal")["prompt"].split("Diff (R<n>")[1]
+        self.assertIn("api/search.py", diff)
+        self.assertNotIn("lib/other.py", diff)  # unchanged since the last review
+        body = payload["body"]
+        self.assertIn("### 🐢 codeturtle · Normal follow-up review", body)
+        self.assertIn("**Since `ccccccc`:** ✅ 1 fixed · 🔁 1 still open · 🆕 1 new", body)
+        self.assertIn("Still open from earlier reviews (1)", body)
+        self.assertEqual(len(payload["comments"]), 1)  # only the new finding goes inline
+        self.assertIn("<!-- codeturtle:finding ct-", payload["comments"][0]["body"])
+        m = run.mocks
+        m["reply_to_comment"].assert_called_once()
+        self.assertIn("Fixed as of `aaaaaaa`: the query is parameterized", m["reply_to_comment"].call_args.args[3])
+        m["resolve_thread"].assert_called_once_with("T1")
+        placements = {f["id"]: f["placement"] for f in result["findings"]}
+        self.assertEqual(placements[F2["id"]], "earlier")
+        self.assertEqual(result["followup"]["fixed"], [F1["id"]])
+        state = followup.decode_state(body)
+        self.assertEqual(state["sha"], "a" * 40)
+        self.assertEqual({f["title"] for f in state["findings"]}, {F2["title"], "Timeout is never cancelled"})
+
+    def test_rewritten_history_gets_a_whole_review(self):
+        run = FakeRun(self)
+        code, payload, result = run.run(None, self.answer, request=Request("o/r", 1, "dispatch", "normal"),
+                                        gh=self.gh(status="diverged"))
+        self.assertNotIn("followup", run.kinds())
+        self.assertIn("lib/other.py", run.call("normal")["prompt"])
+        self.assertIsNone(result["followup"])
+
+    def test_fresh_skips_the_follow_up(self):
+        run = FakeRun(self)
+        run.run(None, self.answer, request=Request("o/r", 1, "dispatch", "normal", fresh=True), gh=self.gh())
+        run.mocks["list_reviews"].assert_not_called()
+        self.assertNotIn("followup", run.kinds())
 
 
 if __name__ == "__main__":

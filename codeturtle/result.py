@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from . import RESULT_SCHEMA_VERSION, __version__
-from .post import SEVERITIES, redact
+from .post import ID_RE, SEVERITIES, redact
 
 RESULT_ENV = "CODETURTLE_RESULT_PATH"
 
@@ -33,10 +33,12 @@ def finding_id(f: dict) -> str:
 
 
 def with_ids(findings: list[dict], inline: list[dict]) -> list[dict]:
+    """Findings for result.json. A finding carried from an earlier review keeps its id (so ids
+    survive line moves); others get one from path, line, severity and title."""
     inline_ids = {id(f) for f in inline}
     out, seen = [], set()
     for f in findings:
-        fid = finding_id(f)
+        fid = f["id"] if isinstance(f.get("id"), str) and ID_RE.match(f["id"]) else finding_id(f)
         n = 2
         base = fid
         while fid in seen:  # same key twice cannot survive post.normalize, but never collide
@@ -50,7 +52,7 @@ def with_ids(findings: list[dict], inline: list[dict]) -> list[dict]:
             "line": f["line"],
             "title": redact(f["title"]),
             "body": redact(f["body"]),
-            "placement": "inline" if id(f) in inline_ids else "body",
+            "placement": "inline" if id(f) in inline_ids else "earlier" if f.get("carried") else "body",
         })
     return out
 
@@ -89,6 +91,7 @@ class ResultWriter:
         self.retry_at: str | None = None  # status usage_limited: earliest reported limit reset
         self.security: dict | None = None  # 1.3: what the security check did, incl. needs_validation leads
         self.verification: dict | None = None  # 1.4: what verification did to the blockers and majors
+        self.followup: dict | None = None  # 1.4: a follow-up review: since, fixed, open, obsolete, new
 
     def set_pr(self, raw: dict) -> None:
         base, head = raw.get("base") or {}, raw.get("head") or {}
@@ -125,6 +128,7 @@ class ResultWriter:
             "notes": [redact(n) for n in self.notes],
             "security": self.security if status == "completed" else None,
             "verification": self.verification if status == "completed" else None,
+            "followup": self.followup if status == "completed" else None,
             "review": self.review,
             "started_at": iso(self.started),
             "finished_at": iso(time.time()),

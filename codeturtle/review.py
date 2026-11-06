@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import github, health, limits, post, prompts, security, verify
+from . import followup, github, health, limits, post, prompts, security, verify
 from . import max_tier, state_dir
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
@@ -128,6 +128,8 @@ class Reviewer:
         self.security_notes: dict[str, str] = {}  # the repo's own security rules (base branch)
         self.tmp: Path | None = None
         self.snapshot: Path | None = None
+        self.followup: followup.Plan | None = None  # set when this review follows up on the last one
+        self.pr_files: list[FileChange] = []
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -181,6 +183,7 @@ class Reviewer:
         self.files = [FileChange.from_api(item) for item in github.get_files(req.repo, req.number)]
         for f in self.files:
             f.ignored = matches_any(f.path, self.cfg["ignore_paths"])
+        self.pr_files = list(self.files)  # the whole PR; self.files narrows to the delta in a follow-up
         self.labels = labels
         self.guidelines = {}
         for path in self.cfg["guideline_files"]:
@@ -192,6 +195,53 @@ class Reviewer:
             if text and text.strip():
                 self.security_notes[path] = text[:20_000]
         return None
+
+    def plan_followup(self) -> None:
+        """Follow up on the last review when this PR's new head descends from the one it saw:
+        review only the PR files changed since, and re-check the earlier findings in them."""
+        if self.req.fresh or not self.cfg.get("incremental", True):
+            return
+        try:
+            state = followup.latest_state(github.list_reviews(self.req.repo, self.req.number))
+        except github.GitHubError as e:
+            log(f"Could not read earlier reviews ({e}); reviewing the whole PR")
+            return
+        if not state or state["sha"] == self.head_sha:
+            return
+        try:
+            change = github.compare(self.req.repo, state["sha"], self.head_sha)
+        except github.GitHubError as e:
+            log(f"Could not compare with the last reviewed commit ({e}); reviewing the whole PR")
+            return
+        if change.get("status") != "ahead":
+            log(f"The PR's history changed since the last review ({change.get('status')}); reviewing the whole PR")
+            return
+        in_pr = {f.path for f in self.pr_files}
+        delta = [FileChange.from_api(item) for item in change.get("files") or [] if item.get("filename") in in_pr]
+        for f in delta:
+            f.ignored = matches_any(f.path, self.cfg["ignore_paths"])
+        if not any(not f.ignored for f in delta):
+            log("None of the PR's reviewable files changed since the last review; reviewing the whole PR")
+            return
+        self.followup = followup.Plan(since=state["sha"], previous=state["findings"], delta_paths={f.path for f in delta})
+        self.files = delta
+        log(f"Follow-up: {len(delta)} files changed since {state['sha'][:7]}; "
+            f"{len(state['findings'])} earlier findings, {len(self.followup.to_check())} in changed files")
+
+    def check_previous(self) -> dict | None:
+        """Statuses (by id) of the earlier findings in changed files, or None when the check failed."""
+        fu = self.followup
+        diff_text, _ = render_diff(self.files, self.cfg["diff_budget_chars"])
+        prompt = followup.prompt(pr=self.pr, since=fu.since, previous=fu.to_check(), diff_text=diff_text)
+        try:
+            data = self.call("followup", "verify", prompt, self.snapshot, read_repo=True, schema="followup", wait=False)
+        except (ProviderError, AllLimited) as e:
+            fu.checked = False
+            fu.notes.append(f"Earlier findings could not be re-checked ({e}), so they are listed as still open.")
+            self.progress.fail("followup")
+            return None
+        fu.checked = True
+        return followup.by_id(data.get("previous"))
 
     def plan_security(self) -> None:
         """Pick the domain checks for this change and decide whether a dedicated security pass
@@ -569,20 +619,31 @@ class Reviewer:
         return used
 
     def publish(self, decision: TierDecision, outcome: Outcome) -> None:
+        fu = self.followup
+        carried = list(fu.open) if fu else []  # still-open earlier findings: listed, not re-posted inline
         findings = post.normalize(outcome.findings, decision.tier)
-        inline, rest = post.split_inline(findings, self.files, self.cfg["max_inline_comments"])
-        notes = self.health_notes + self.sec.notes + self.ver.notes + outcome.notes
+        if fu:
+            findings = fu.drop_repeats(findings)
+            fu.new = len(findings)
+        self.assign_ids(findings, taken={f["id"] for f in carried})
+        inline, rest = post.split_inline(findings, self.pr_files, self.cfg["max_inline_comments"])
+        notes = self.health_notes + self.sec.notes + self.ver.notes + (fu.notes if fu else []) + outcome.notes
         body_args = dict(
             tier=decision.tier, tier_reason=decision.reason, reviewers=self.reviewers(),
-            summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=notes,
-            security=self.sec, verification=self.ver,
+            summary=outcome.summary, findings=carried + findings, head_sha=self.head_sha, notes=notes,
+            security=self.sec, verification=self.ver, followup=fu,
         )
-        payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
+        # The hidden state lets the next review of this PR follow up on this one.
+        state = followup.encode_state(self.head_sha, [
+            {**f, "title": post.redact(f["title"]), "body": post.redact(f["body"])} for f in carried + findings])
+        body = post.build_body(inline=inline, rest=rest, **body_args) + "\n\n" + state
+        payload = post.build_payload(head_sha=self.head_sha, body=body, inline=inline)
         self.result.summary = outcome.summary
         self.result.notes = list(notes)
-        self.result.findings = with_ids(findings, inline)
+        self.result.findings = with_ids(carried + findings, inline)
         self.result.security = self.security_result()
         self.result.verification = self.verification_result()
+        self.result.followup = fu.result() if fu else None
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
         if self.dry_run:
@@ -596,11 +657,55 @@ class Reviewer:
             posted = github.post_review(self.req.repo, self.req.number, payload)
         except github.GitHubError as e:
             log(f"Posting inline comments failed ({e}); posting everything in the review body")
-            body = post.build_body(inline=[], rest=findings, **body_args)
+            body = post.build_body(inline=[], rest=findings, **body_args) + "\n\n" + state
             posted = github.post_review(self.req.repo, self.req.number, post.build_payload(head_sha=self.head_sha, body=body, inline=[]))
-            self.result.findings = with_ids(findings, [])
+            self.result.findings = with_ids(carried + findings, [])
         self.result.review = {"id": posted.get("id"), "url": posted.get("html_url")}
         log(f"Posted review: {len(inline)} inline comments, {len(rest)} in the body")
+        if fu:
+            self.resolve_fixed(fu)
+
+    @staticmethod
+    def assign_ids(findings: list[dict], taken: set[str]) -> None:
+        """Give each new finding a stable id now, so its inline comment can carry it."""
+        for f in findings:
+            if not f.get("id"):
+                base = fid = finding_id(f)
+                n = 2
+                while fid in taken:
+                    fid, n = f"{base}-{n}", n + 1
+                f["id"] = fid
+            taken.add(f["id"])
+
+    def resolve_fixed(self, fu: followup.Plan) -> None:
+        """Reply to and resolve the threads of earlier findings that are fixed or no longer apply.
+        Best effort: a failure here never fails the review."""
+        done = {f["id"]: f for f in fu.fixed + fu.obsolete}
+        if not done:
+            return
+        try:
+            threads = github.review_threads(self.req.repo, self.req.number)
+        except github.GitHubError as e:
+            log(f"Could not list review threads ({e}); leaving them open")
+            return
+        resolved = 0
+        for thread in threads:
+            first = ((thread.get("comments") or {}).get("nodes") or [{}])[0]
+            m = followup.FINDING_RE.search(first.get("body") or "")
+            if not m or m.group(1) not in done or thread.get("isResolved"):
+                continue
+            f = done[m.group(1)]
+            word = "Fixed" if f in fu.fixed else "No longer applies"
+            note = post.redact(f": {f['note']}" if f.get("note") else "")
+            try:
+                if first.get("databaseId"):
+                    github.reply_to_comment(self.req.repo, self.req.number, first["databaseId"],
+                                            f"✅ {word} as of `{self.head_sha[:7]}`{note}")
+                github.resolve_thread(thread["id"])
+                resolved += 1
+            except github.GitHubError as e:
+                log(f"Could not resolve the thread for {m.group(1)}: {e}")
+        log(f"Resolved {resolved} review threads of fixed findings")
 
     def fail(self, message: str) -> None:
         notes = "".join(f"\n\n> {n}" for n in self.health_notes)
@@ -644,20 +749,31 @@ class Reviewer:
                 self.tmp = Path(tmp)
                 self.work = self.tmp / "empty"
                 self.work.mkdir()
+                with group("Checking for an earlier review"):
+                    self.plan_followup()
                 with group("Choosing review tier"):
                     decision = self.choose_tier(self.work)
                     log(f"Tier: {decision.tier} ({decision.source}: {decision.reason})")
                     self.result.tier = {"name": decision.tier, "source": decision.source, "reason": decision.reason}
                     self.progress.tier(decision.tier, decision.reason, decided_by=decision.source)
                     self.plan_security()
+                    recheck = ["followup"] if self.followup and self.followup.to_check() else []
                     if decision.tier != "full":
-                        self.progress.plan([decision.tier] + (["security"] if self.sec.dedicated else []) + ["verify", "post"])
-                snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") else None
-                with group(f"{decision.tier.capitalize()} review"):
-                    if decision.tier == "full":
-                        outcome = self.review_full(snapshot, decision)
-                    else:
-                        outcome = self.review_single(decision.tier, self.work, snapshot)
+                        self.progress.plan(recheck + [decision.tier] + (["security"] if self.sec.dedicated else [])
+                                           + ["verify", "post"])
+                    elif recheck:
+                        self.progress.plan(recheck)
+                snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") or recheck else None
+                # Earlier findings are re-checked while the new commits are reviewed.
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    rechecking = pool.submit(self.check_previous) if recheck else None
+                    with group(f"{decision.tier.capitalize()} review"):
+                        if decision.tier == "full":
+                            outcome = self.review_full(snapshot, decision)
+                        else:
+                            outcome = self.review_single(decision.tier, self.work, snapshot)
+                    if self.followup:
+                        self.followup.apply(rechecking.result() if rechecking else None)
                 self.publish(decision, outcome)
             status, error = "completed", None
             return 0

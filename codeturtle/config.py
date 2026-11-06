@@ -18,6 +18,9 @@ DEFAULTS: dict = {
     # The merge step only de-duplicates, so it runs at low effort.
     "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "low", "verify": "medium"},
     "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10, "verify": 15},
+    # Review only what changed since the last review of the same PR, re-check its findings, and
+    # resolve the threads of fixed ones (followup.py). `/review fresh` reviews the whole PR.
+    "incremental": True,
     # Before posting, an independent call re-reads the code for these findings and drops or
     # downgrades any it can't confirm (verify.py). Empty list: post everything as written.
     "verify": {

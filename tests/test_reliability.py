@@ -392,7 +392,8 @@ class ReviewerTests(TempHome):
         result_path = self.home / "result.json"
         gh = mock.patch.multiple(github, get_pr=mock.DEFAULT, file_at_ref=mock.DEFAULT, get_files=mock.DEFAULT,
                                  post_comment=mock.DEFAULT, edit_comment=mock.DEFAULT, delete_comment=mock.DEFAULT,
-                                 list_comments=mock.DEFAULT, post_review=mock.DEFAULT)
+                                 list_comments=mock.DEFAULT, post_review=mock.DEFAULT,
+                                 list_reviews=mock.DEFAULT)
         with gh as m, mock.patch.object(health, "check_all", return_value=found), \
                 mock.patch.dict(providers.RUNNERS, runners, clear=True), \
                 mock.patch.dict(os.environ, {"CODETURTLE_RESULT_PATH": str(result_path)}), \
@@ -403,6 +404,7 @@ class ReviewerTests(TempHome):
             m["get_files"].return_value = self.FILES
             m["post_comment"].return_value = 11
             m["list_comments"].return_value = []
+            m["list_reviews"].return_value = []
             m["post_review"].return_value = {"id": 5, "html_url": "https://example.test/review/5"}
             code = Reviewer(Request("o/r", 1, "dispatch")).run()
         return code, m, json.loads(result_path.read_text())

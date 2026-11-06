@@ -177,6 +177,7 @@ class ReviewFlowTests(unittest.TestCase):
         gh = mock.patch.multiple(github, get_pr=mock.DEFAULT, file_at_ref=mock.DEFAULT, get_files=mock.DEFAULT,
                                  post_comment=mock.DEFAULT, edit_comment=mock.DEFAULT, delete_comment=mock.DEFAULT,
                                  list_comments=mock.DEFAULT, post_review=mock.DEFAULT,
+                                 list_reviews=mock.DEFAULT,
                                  download_snapshot=mock.DEFAULT)
         found = {n: health.Health(n, "ok") for n in ("codex", "grok", "claude")}
         with gh as m, mock.patch.object(health, "check_all", return_value=found), \
@@ -188,6 +189,7 @@ class ReviewFlowTests(unittest.TestCase):
             m["get_files"].return_value = files
             m["post_comment"].return_value = 11
             m["list_comments"].return_value = []
+            m["list_reviews"].return_value = []
             m["post_review"].return_value = {"id": 5, "html_url": "https://example.test/review/5"}
             m["download_snapshot"].side_effect = self.fake_snapshot
             code = Reviewer(Request("o/r", 1, "dispatch", tier)).run()

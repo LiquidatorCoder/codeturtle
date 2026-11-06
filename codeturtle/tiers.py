@@ -9,7 +9,9 @@ from . import TIERS, max_tier, tier_rank
 from .config import matches_any
 from .diff import FileChange
 
-COMMAND_RE = re.compile(r"^\s*/review(?:\s+(fast|normal|full))?\s*$", re.IGNORECASE)
+# `/review`, `/review full`, `/review fresh`, `/review fresh full`. "fresh" reviews the whole PR
+# instead of following up on the last review.
+COMMAND_RE = re.compile(r"^\s*/review(\s+fresh)?(?:\s+(fast|normal|full))?\s*$", re.IGNORECASE)
 LABEL_PREFIX = "review:"
 
 
@@ -62,13 +64,23 @@ def raise_floor(floor: str, reason: str, min_tier: str | None) -> tuple[str, str
     return min_tier, f"minimum tier {min_tier} requested by the caller ({reason})"
 
 
-def parse_command(body: str) -> tuple[bool, str | None]:
-    """`/review` or `/review <tier>` on the comment's first line -> (is_command, tier or None)."""
+def _command(body: str):
     first = (body or "").strip().splitlines()[0] if (body or "").strip() else ""
-    m = COMMAND_RE.match(first)
+    return COMMAND_RE.match(first)
+
+
+def parse_command(body: str) -> tuple[bool, str | None]:
+    """`/review [fresh] [<tier>]` on the comment's first line -> (is_command, tier or None)."""
+    m = _command(body)
     if not m:
         return False, None
-    return True, (m.group(1) or "").lower() or None
+    return True, (m.group(2) or "").lower() or None
+
+
+def wants_fresh(body: str) -> bool:
+    """`/review fresh ...`: review the whole PR, not just what changed since the last review."""
+    m = _command(body)
+    return bool(m and m.group(1))
 
 
 def label_override(labels: list[str]) -> str | None:

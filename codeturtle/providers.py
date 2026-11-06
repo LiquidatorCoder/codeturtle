@@ -340,6 +340,8 @@ def valid(schema: str, data: dict | None) -> bool:
         return isinstance(data.get("summary"), str) and isinstance(data.get("candidates"), list)
     if schema == "verify":
         return isinstance(data.get("verdicts"), list)
+    if schema == "followup":
+        return isinstance(data.get("summary"), str) and isinstance(data.get("previous"), list)
     return isinstance(data.get("summary"), str) and isinstance(data.get("findings"), list)
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .tiers import parse_command
+from .tiers import parse_command, wants_fresh
 
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 PR_ACTIONS = {"opened", "reopened", "ready_for_review"}
@@ -25,6 +25,11 @@ class Request:
     comment_id: int | None = None
     min_tier: str | None = None  # floor raise: max(rules floor, min_tier); never lowers anything
     request_id: str | None = None
+    fresh: bool = False  # review the whole PR, not a follow-up on the last review
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("true", "1", "yes")
 
 
 class BadRequest(ValueError):
@@ -47,7 +52,7 @@ def _clean_request_id(value: str | None) -> str | None:
 
 def from_event(
     name: str, event: dict, repo: str, tier_input: str = "", pr_input: str = "",
-    min_tier_input: str = "", request_id_input: str = "",
+    min_tier_input: str = "", request_id_input: str = "", fresh_input: str = "",
 ) -> tuple[Request | None, str]:
     """Returns (request, "") to review, or (None, reason) to skip. Raises BadRequest on bad inputs."""
     tier_input = (tier_input or "").strip().lower() or None
@@ -62,7 +67,7 @@ def from_event(
         marker = MIN_TIER_MARKER_RE.search(pr.get("body") or "")
         min_tier = min_tier_input or (marker.group(1).lower() if marker else None)
         return Request(repo, int(pr["number"]), "pull_request", tier_input, min_tier=min_tier,
-                       request_id=request_id_input), ""
+                       request_id=request_id_input, fresh=_truthy(fresh_input)), ""
 
     if name == "issue_comment":
         issue, comment = event.get("issue", {}), event.get("comment", {})
@@ -74,7 +79,8 @@ def from_event(
         if comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
             return None, f"/review from {comment.get('author_association')} is ignored (owner/member/collaborator only)"
         return Request(repo, int(issue["number"]), "comment", tier or tier_input, int(comment["id"]),
-                       min_tier=min_tier_input, request_id=request_id_input), ""
+                       min_tier=min_tier_input, request_id=request_id_input,
+                       fresh=wants_fresh(comment.get("body", "")) or _truthy(fresh_input)), ""
 
     if name == "workflow_dispatch":
         inputs = event.get("inputs") or {}
@@ -85,6 +91,7 @@ def from_event(
             repo, int(number), "dispatch", (inputs.get("tier") or "").lower() or tier_input,
             min_tier=_clean_min_tier(inputs.get("min_tier")) or min_tier_input,
             request_id=_clean_request_id(inputs.get("request_id")) or request_id_input,
+            fresh=_truthy(inputs.get("fresh")) or _truthy(fresh_input),
         ), ""
 
     return None, f"event {name!r} is not handled"
