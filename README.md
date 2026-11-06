@@ -90,7 +90,7 @@ Nothing here is done by hand: releasing is merging a version bump, and every rep
   | Workflow | What happens |
   |---|---|
   | in sync | nothing |
-  | outdated: an unmodified older template | a PR (`codeturtle/workflow-sync`, labelled `codeturtle:skip`) updates it and is merged at once. Its commits carry `[skip ci]`, so neither the PR nor the merge runs the repository's CI, deploys or a review |
+  | outdated: an unmodified older template | a PR (`codeturtle/workflow-sync`, labelled `codeturtle:skip`) updates it and is merged at once. Its commits carry `[skip ci]`, so neither the PR nor the merge starts the repository's GitHub Actions (CI, build or deploy workflows) or a review. A host that deploys through its own GitHub app, such as Vercel, ignores `[skip ci]` and redeploys the unchanged app |
   | pinned: an older template on another ref (`@v1.1.0`, a SHA) | reported, never changed |
   | customized: anything else | reported, never changed |
   | opted out: the file has a `# codeturtle-sync: off` line | reported, never changed |

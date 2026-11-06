@@ -44,7 +44,8 @@ REQUIRED_DISPATCH_INPUTS = ("pr", "min_tier", "request_id")  # what the Claude C
 SYNC_BRANCH = "codeturtle/workflow-sync"
 SKIP_LABEL = "codeturtle:skip"
 # Only the codeturtle workflow changes, so nothing needs to build: without this the PR and the merge
-# would run the repository's CI (and push-to-main builds or deploys) and a codeturtle review.
+# would run the repository's CI (and push-to-main build or deploy workflows) and a codeturtle review.
+# A host that deploys through its own GitHub app (Vercel, say) ignores it and redeploys the same app.
 SKIP_CI = f"Only {WORKFLOW_PATH} changes; no workflow needs to run for it. [skip ci]"
 OPT_OUT_RE = re.compile(r"^\s*#\s*codeturtle-sync:\s*off\b", re.M | re.I)
 USES_RE = re.compile(r"^(\s*-?\s*uses:\s*)" + re.escape(ACTION_REPO) + r"@([^\s#]+)[^\n]*$", re.M | re.I)
