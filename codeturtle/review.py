@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import github, health, limits, post, prompts, security
+from . import followup, github, health, limits, post, prompts, security, verify
 from . import max_tier, state_dir
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
@@ -20,7 +20,7 @@ from .events import Request
 from .progress import Progress
 from .providers import AllLimited, Call, Chain, ProviderError, Unavailable, kill_all, label
 from .result import ResultWriter, finding_id, iso, with_ids
-from .tiers import TierDecision, combine, floor_tier, label_override, raise_floor
+from .tiers import TierDecision, combine, floor_tier, is_production, is_sensitive, label_override, raise_floor
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
 AGENT_CONFIG_FILES = {
@@ -123,10 +123,13 @@ class Reviewer:
         self.health: dict[str, health.Health] = {}
         self.health_notes: list[str] = []  # broken providers, with the fix; shown on the PR
         self.sec = security.Report()  # what this review's security check did
+        self.ver = verify.Report()  # what verification did to the blockers and majors
         self.companions: list[security.Companion] = []
         self.security_notes: dict[str, str] = {}  # the repo's own security rules (base branch)
         self.tmp: Path | None = None
         self.snapshot: Path | None = None
+        self.followup: followup.Plan | None = None  # set when this review follows up on the last one
+        self.pr_files: list[FileChange] = []
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -180,6 +183,7 @@ class Reviewer:
         self.files = [FileChange.from_api(item) for item in github.get_files(req.repo, req.number)]
         for f in self.files:
             f.ignored = matches_any(f.path, self.cfg["ignore_paths"])
+        self.pr_files = list(self.files)  # the whole PR; self.files narrows to the delta in a follow-up
         self.labels = labels
         self.guidelines = {}
         for path in self.cfg["guideline_files"]:
@@ -191,6 +195,53 @@ class Reviewer:
             if text and text.strip():
                 self.security_notes[path] = text[:20_000]
         return None
+
+    def plan_followup(self) -> None:
+        """Follow up on the last review when this PR's new head descends from the one it saw:
+        review only the PR files changed since, and re-check the earlier findings in them."""
+        if self.req.fresh or not self.cfg.get("incremental", True):
+            return
+        try:
+            state = followup.latest_state(github.list_reviews(self.req.repo, self.req.number))
+        except github.GitHubError as e:
+            log(f"Could not read earlier reviews ({e}); reviewing the whole PR")
+            return
+        if not state or state["sha"] == self.head_sha:
+            return
+        try:
+            change = github.compare(self.req.repo, state["sha"], self.head_sha)
+        except github.GitHubError as e:
+            log(f"Could not compare with the last reviewed commit ({e}); reviewing the whole PR")
+            return
+        if change.get("status") != "ahead":
+            log(f"The PR's history changed since the last review ({change.get('status')}); reviewing the whole PR")
+            return
+        in_pr = {f.path for f in self.pr_files}
+        delta = [FileChange.from_api(item) for item in change.get("files") or [] if item.get("filename") in in_pr]
+        for f in delta:
+            f.ignored = matches_any(f.path, self.cfg["ignore_paths"])
+        if not any(not f.ignored for f in delta):
+            log("None of the PR's reviewable files changed since the last review; reviewing the whole PR")
+            return
+        self.followup = followup.Plan(since=state["sha"], previous=state["findings"], delta_paths={f.path for f in delta})
+        self.files = delta
+        log(f"Follow-up: {len(delta)} files changed since {state['sha'][:7]}; "
+            f"{len(state['findings'])} earlier findings, {len(self.followup.to_check())} in changed files")
+
+    def check_previous(self) -> dict | None:
+        """Statuses (by id) of the earlier findings in changed files, or None when the check failed."""
+        fu = self.followup
+        diff_text, _ = render_diff(self.files, self.cfg["diff_budget_chars"])
+        prompt = followup.prompt(pr=self.pr, since=fu.since, previous=fu.to_check(), diff_text=diff_text)
+        try:
+            data = self.call("followup", "verify", prompt, self.snapshot, read_repo=True, schema="followup", wait=False)
+        except (ProviderError, AllLimited) as e:
+            fu.checked = False
+            fu.notes.append(f"Earlier findings could not be re-checked ({e}), so they are listed as still open.")
+            self.progress.fail("followup")
+            return None
+        fu.checked = True
+        return followup.by_id(data.get("previous"))
 
     def plan_security(self) -> None:
         """Pick the domain checks for this change and decide whether a dedicated security pass
@@ -264,10 +315,11 @@ class Reviewer:
     # ---- passes ------------------------------------------------------------------------------
 
     def call(self, kind: str, effort_key: str, prompt: str, cwd: Path, read_repo: bool = False,
-             schema: str = "review", wait: bool = True) -> dict:
-        """One model call. `wait=False` for a step with its own fallback (merge, verify): it never
-        waits for a usage limit to reset."""
-        data = self.chain.run(Call(
+             schema: str = "review", wait: bool = True, avoid=(), full_result: bool = False):
+        """One model call; returns its JSON (or the whole Result with `full_result`). `wait=False`
+        for a step with its own fallback (merge, verify): it never waits for a usage limit to reset.
+        `avoid`: providers to use only when no other can run."""
+        result = self.chain.run(Call(
             kind=kind,
             prompt=prompt,
             schema=schema,
@@ -275,9 +327,9 @@ class Reviewer:
             effort=self.cfg["effort"][effort_key],
             timeout_s=self.cfg["timeout_minutes"][effort_key] * 60,
             read_repo=read_repo,
-        ), wait=wait).data
+        ), wait=wait, avoid=avoid)
         self.progress.done(kind)
-        return data
+        return result if full_result else result.data
 
     def run_jobs(self, jobs: list[tuple[str, callable, bool]]) -> dict:
         """Run (key, call, optional) jobs, up to `full_parallel` at once. A required job's failure
@@ -310,10 +362,10 @@ class Reviewer:
                 sanitize_snapshot(self.snapshot)
         return self.snapshot
 
-    def context_files(self, snapshot: Path) -> dict[str, str]:
+    def context_files(self, snapshot: Path, files: list[FileChange] | None = None) -> dict[str, str]:
         out, used = {}, 0
         budget = self.cfg["context_budget_chars"]
-        for f in sorted(self.files, key=lambda f: f.changes, reverse=True):
+        for f in sorted(self.files if files is None else files, key=lambda f: f.changes, reverse=True):
             if f.ignored or f.status == "removed":
                 continue
             path = snapshot / f.path
@@ -354,46 +406,82 @@ class Reviewer:
         findings = self.check_security(data["findings"], results.get("security"), "security", tier, snapshot)
         return Outcome(data["summary"], findings, notes)
 
-    def review_full(self, snapshot: Path) -> Outcome:
-        chunks = chunk_files(self.files, self.cfg["diff_budget_chars"])
-        passes = []  # (kind, prompt, schema, optional)
+    def risk_split(self, decision: TierDecision) -> tuple[list[FileChange], list[FileChange]]:
+        """(files for the full passes, files for a normal-depth pass). The rules chose `full` only
+        because of sensitive paths: those files get the full passes and the rest a normal one. A
+        requested or triaged full review, or one the size rule alone would force, covers everything."""
+        rules = self.cfg["tiers"]
+        reviewed = [f for f in self.files if not f.ignored]
+        production_lines = sum(f.changes for f in reviewed if is_production(f, rules))
+        if (not rules.get("split_full", True) or decision.source not in ("rules", "min_tier")
+                or production_lines > rules["full_if_lines_over"]):
+            return self.files, []
+        rest = [f for f in reviewed if not is_sensitive(f, rules)]
+        full = [f for f in self.files if f not in rest]  # sensitive files, plus generated ones as headers
+        if not rest or not any(is_sensitive(f, rules) for f in full):
+            return self.files, []
+        return full, rest
+
+    def review_full(self, snapshot: Path, decision: TierDecision) -> Outcome:
+        budget = self.cfg["diff_budget_chars"]
+        full_files, rest = self.risk_split(decision)
+        chunks = chunk_files(full_files, budget)
+        passes = []  # (kind, prompt, schema, optional, effort, cwd, read_repo)
+        sensitive = len([f for f in full_files if not f.ignored])
+        split_note = [f"Only {sensitive} of the changed files touch sensitive paths, and this pass reviews "
+                      f"those. The other {len(rest)} files get a normal-depth review separately; you may "
+                      "read them for context."] if rest else []
 
         def review_pass(kind, focus, diff_text, notes):
             prompt = prompts.review_prompt(pr=self.pr, tier="full", diff_text=diff_text, focus=focus,
                                            guidelines=self.guidelines, notes=notes)
-            passes.append((kind, prompt, "review", False))
+            passes.append((kind, prompt, "review", False, "full", snapshot, True))
 
         def security_pass(diff_text, notes):
             if self.sec.dedicated:
                 prompt = security.pass_prompt(pr=self.pr, depth="repo", diff_text=diff_text, companions=self.companions,
                                               notes=self.security_notes, extra=notes)
-                passes.append(("full:security", prompt, "security", True))
+                passes.append(("full:security", prompt, "security", True, "full", snapshot, True))
 
         if len(chunks) == 1:
-            diff_text, _ = render_diff(chunks[0], self.cfg["diff_budget_chars"])
-            review_pass("full:correctness", "correctness", diff_text, [])
-            security_pass(diff_text, [])
-            review_pass("full:tests", "tests", diff_text, [])
+            diff_text, _ = render_diff(chunks[0], budget)
+            review_pass("full:correctness", "correctness", diff_text, split_note)
+            # The security pass always sees the whole change, sensitive files first.
+            security_pass(*(self.security_diff() if rest else (diff_text, [])))
+            review_pass("full:tests", "tests", diff_text, split_note)
         else:
             for i, chunk in enumerate(chunks, 1):
-                diff_text, _ = render_diff(chunk, self.cfg["diff_budget_chars"])
+                diff_text, _ = render_diff(chunk, budget)
                 note = (f"The diff is large, so it is reviewed in {len(chunks)} parts. This is part {i}; "
                         "other files are reviewed separately but you may read them for context.")
-                review_pass(f"full:part{i}", "all", diff_text, [note])
+                review_pass(f"full:part{i}", "all", diff_text, [note] + split_note)
             security_pass(*self.security_diff())
+        rest_chunks = chunk_files(rest, budget) if rest else []
+        for i, chunk in enumerate(rest_chunks, 1):
+            diff_text, _ = render_diff(chunk, budget)
+            note = ("These files don't touch sensitive paths, so they get a normal-depth review; the sensitive "
+                    "files get a full review separately."
+                    + (f" This is part {i} of {len(rest_chunks)}." if len(rest_chunks) > 1 else ""))
+            prompt = prompts.review_prompt(pr=self.pr, tier="normal", diff_text=diff_text, guidelines=self.guidelines,
+                                           context_files=self.context_files(snapshot, chunk), notes=[note])
+            kind = "full:rest" if len(rest_chunks) == 1 else f"full:rest{i}"
+            passes.append((kind, prompt, "review", False, "normal", self.work, False))
         self.progress.plan([kind for kind, *_ in passes] + ["verify", "merge", "post"], parts=len(chunks))
 
         results = self.run_jobs([
-            (kind, (lambda kind=kind, prompt=prompt, schema=schema:
-                    self.call(kind, "full", prompt, snapshot, read_repo=True, schema=schema)), optional)
-            for kind, prompt, schema, optional in passes
+            (kind, (lambda kind=kind, prompt=prompt, schema=schema, effort=effort, cwd=cwd, read=read:
+                    self.call(kind, effort, prompt, cwd, read_repo=read, schema=schema)), optional)
+            for kind, prompt, schema, optional, effort, cwd, read in passes
         ])
-        reviews = [results[kind] for kind, _, schema, _ in passes if schema == "review"]
+        reviews = [results[kind] for kind, _, schema, *_ in passes if schema == "review"]
         summaries = [r["summary"] for r in reviews]
         findings = [item for r in reviews for item in r["findings"]]
         findings = self.check_security(findings, results.get("full:security"), "full:security", "full", snapshot)
 
         notes = [f"Reviewed in {len(chunks)} parts because of its size."] if len(chunks) > 1 else []
+        if rest:
+            notes.append(f"Full review on the {sensitive} files that touch sensitive paths; normal-depth "
+                         f"review on the other {len(rest)}.")
         if not findings:
             self.progress.skip("merge")
             return Outcome(summaries[0], [], notes)
@@ -426,47 +514,77 @@ class Reviewer:
         return diff_text, notes
 
     def check_security(self, findings: list, pass_result, pass_kind: str, tier: str, snapshot: Path | None) -> list:
-        """Verify every security candidate (the dedicated pass's, plus security findings from the
-        other passes) and return the findings to post: the non-security ones plus the confirmed."""
-        rep = self.sec
+        """Independent verification before anything is posted: every security candidate (the
+        dedicated pass's, plus security findings from the other passes) and every blocker and major,
+        in one call on a different provider where one is available. Returns the findings to post."""
+        rep, ver = self.sec, self.ver
         if isinstance(pass_result, Exception):
             rep.notes.append(f"The dedicated security pass failed ({pass_result}), so only the main review "
                              "checked security.")
             self.progress.fail(pass_kind)
             pass_result = None
-        others = [f for f in findings if not security.is_security(f)]
+        findings = [f for f in findings if isinstance(f, dict)]
+        severities = {str(s).lower() for s in self.cfg["verify"].get("severities") or []}
+        plain = [f for f in findings if not security.is_security(f)]
+        bugs = verify.bug_items([f for f in plain if str(f.get("severity", "")).lower() in severities])
+        others = [f for f in plain if str(f.get("severity", "")).lower() not in severities]
         raw = list((pass_result or {}).get("candidates") or [])
         raw += security.from_findings([f for f in findings if security.is_security(f)])
         candidates = security.normalize(raw)
-        rep.candidates = len(candidates)
-        if not candidates:
-            self.progress.skip("verify")
-            return others
-        if not self.cfg["security"].get("verify", True):
+        rep.candidates, ver.checked = len(candidates), len(bugs)
+        check_security = bool(candidates) and self.cfg["security"].get("verify", True)
+        confirmed = []
+        if candidates and not check_security:
             confirmed, rep.leads = security.unverified(candidates)
             rep.verified = False
+        kept = [{k: b[k] for k in ("severity", "category", "path", "line", "title", "body")} for b in bugs]
+        if not (bugs or check_security):
             self.progress.skip("verify")
         else:
             try:
                 snapshot = snapshot or self.ensure_snapshot()
-                cited = {c["path"] for c in candidates}
+                cited = {c["path"] for c in candidates} | {b["path"] for b in bugs}
                 diff_text, _ = render_diff([f for f in self.files if f.path in cited] or self.files,
                                            self.cfg["context_budget_chars"])
-                prompt = security.verify_prompt(pr=self.pr, candidates=candidates, diff_text=diff_text,
-                                                notes=self.security_notes)
-                data = self.call("verify", "verify", prompt, snapshot, read_repo=True, schema="verify", wait=False)
-                confirmed, rep.leads, rep.rejected = security.apply_verdicts(candidates, data["verdicts"])
-                rep.verified = True
+                prompt = verify.prompt(pr=self.pr, security_items=candidates if check_security else [], bugs=bugs,
+                                       diff_text=diff_text, notes=self.security_notes)
+                # The agent that checks a finding should not be the one that found it.
+                avoid = set(self.chain.used) if self.cfg["verify"].get("different_provider", True) else set()
+                result = self.call("verify", "verify", prompt, snapshot, read_repo=True, schema="verify",
+                                   wait=False, avoid=avoid, full_result=True)
+                verdicts = verify.by_id(result.data["verdicts"])
+                ver.provider = f"{label(result.provider)} ({result.model})"
+                ver.same_provider = result.provider in avoid
+                if check_security:
+                    confirmed, rep.leads, rep.rejected = security.apply_verdicts(candidates, result.data["verdicts"])
+                    rep.verified = True
+                kept = verify.apply(bugs, verdicts, ver)
             except (ProviderError, AllLimited, github.GitHubError) as e:
-                log(f"[verify] failed ({e}); posting the security candidates unverified")
-                confirmed, rep.leads = security.unverified(candidates)
-                rep.verified = False
-                rep.notes.append(f"The security findings were not independently verified ({e}).")
+                log(f"[verify] failed ({e}); posting the findings unverified")
+                if check_security:
+                    confirmed, rep.leads = security.unverified(candidates)
+                    rep.verified = False
+                    rep.notes.append(f"The security findings were not independently verified ({e}).")
+                if bugs:
+                    ver.unchecked = len(bugs)
+                    ver.notes.append(f"The blocker and major findings were not independently verified ({e}).")
                 self.progress.fail("verify")
         if tier == "fast":  # a fast review posts only blockers and majors
             confirmed = [f for f in confirmed if f["severity"] in ("blocker", "major")]
         rep.confirmed = len(confirmed)
-        return others + confirmed
+        return others + kept + confirmed
+
+    def verification_result(self) -> dict:
+        v = self.ver
+        return {
+            "checked": v.checked, "confirmed": v.confirmed, "downgraded": v.downgraded, "rejected": v.rejected,
+            "unchecked": v.unchecked, "provider": v.provider, "same_provider": v.same_provider,
+            "needs_validation": [{
+                "id": finding_id({**lead, "severity": "needs_validation"}),
+                "path": lead["path"], "line": lead["line"], "category": lead["attack_class"],
+                "title": post.redact(lead["title"]), "unresolved": post.redact(lead["unresolved"]),
+            } for lead in v.leads],
+        }
 
     def security_result(self) -> dict:
         rep = self.sec
@@ -501,19 +619,31 @@ class Reviewer:
         return used
 
     def publish(self, decision: TierDecision, outcome: Outcome) -> None:
+        fu = self.followup
+        carried = list(fu.open) if fu else []  # still-open earlier findings: listed, not re-posted inline
         findings = post.normalize(outcome.findings, decision.tier)
-        inline, rest = post.split_inline(findings, self.files, self.cfg["max_inline_comments"])
-        notes = self.health_notes + self.sec.notes + outcome.notes
+        if fu:
+            findings = fu.drop_repeats(findings)
+            fu.new = len(findings)
+        self.assign_ids(findings, taken={f["id"] for f in carried})
+        inline, rest = post.split_inline(findings, self.pr_files, self.cfg["max_inline_comments"])
+        notes = self.health_notes + self.sec.notes + self.ver.notes + (fu.notes if fu else []) + outcome.notes
         body_args = dict(
             tier=decision.tier, tier_reason=decision.reason, reviewers=self.reviewers(),
-            summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=notes,
-            security=self.sec,
+            summary=outcome.summary, findings=carried + findings, head_sha=self.head_sha, notes=notes,
+            security=self.sec, verification=self.ver, followup=fu,
         )
-        payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
+        # The hidden state lets the next review of this PR follow up on this one.
+        state = followup.encode_state(self.head_sha, [
+            {**f, "title": post.redact(f["title"]), "body": post.redact(f["body"])} for f in carried + findings])
+        body = post.build_body(inline=inline, rest=rest, **body_args) + "\n\n" + state
+        payload = post.build_payload(head_sha=self.head_sha, body=body, inline=inline)
         self.result.summary = outcome.summary
         self.result.notes = list(notes)
-        self.result.findings = with_ids(findings, inline)
+        self.result.findings = with_ids(carried + findings, inline)
         self.result.security = self.security_result()
+        self.result.verification = self.verification_result()
+        self.result.followup = fu.result() if fu else None
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
         if self.dry_run:
@@ -527,11 +657,55 @@ class Reviewer:
             posted = github.post_review(self.req.repo, self.req.number, payload)
         except github.GitHubError as e:
             log(f"Posting inline comments failed ({e}); posting everything in the review body")
-            body = post.build_body(inline=[], rest=findings, **body_args)
+            body = post.build_body(inline=[], rest=findings, **body_args) + "\n\n" + state
             posted = github.post_review(self.req.repo, self.req.number, post.build_payload(head_sha=self.head_sha, body=body, inline=[]))
-            self.result.findings = with_ids(findings, [])
+            self.result.findings = with_ids(carried + findings, [])
         self.result.review = {"id": posted.get("id"), "url": posted.get("html_url")}
         log(f"Posted review: {len(inline)} inline comments, {len(rest)} in the body")
+        if fu:
+            self.resolve_fixed(fu)
+
+    @staticmethod
+    def assign_ids(findings: list[dict], taken: set[str]) -> None:
+        """Give each new finding a stable id now, so its inline comment can carry it."""
+        for f in findings:
+            if not f.get("id"):
+                base = fid = finding_id(f)
+                n = 2
+                while fid in taken:
+                    fid, n = f"{base}-{n}", n + 1
+                f["id"] = fid
+            taken.add(f["id"])
+
+    def resolve_fixed(self, fu: followup.Plan) -> None:
+        """Reply to and resolve the threads of earlier findings that are fixed or no longer apply.
+        Best effort: a failure here never fails the review."""
+        done = {f["id"]: f for f in fu.fixed + fu.obsolete}
+        if not done:
+            return
+        try:
+            threads = github.review_threads(self.req.repo, self.req.number)
+        except github.GitHubError as e:
+            log(f"Could not list review threads ({e}); leaving them open")
+            return
+        resolved = 0
+        for thread in threads:
+            first = ((thread.get("comments") or {}).get("nodes") or [{}])[0]
+            m = followup.FINDING_RE.search(first.get("body") or "")
+            if not m or m.group(1) not in done or thread.get("isResolved"):
+                continue
+            f = done[m.group(1)]
+            word = "Fixed" if f in fu.fixed else "No longer applies"
+            note = post.redact(f": {f['note']}" if f.get("note") else "")
+            try:
+                if first.get("databaseId"):
+                    github.reply_to_comment(self.req.repo, self.req.number, first["databaseId"],
+                                            f"✅ {word} as of `{self.head_sha[:7]}`{note}")
+                github.resolve_thread(thread["id"])
+                resolved += 1
+            except github.GitHubError as e:
+                log(f"Could not resolve the thread for {m.group(1)}: {e}")
+        log(f"Resolved {resolved} review threads of fixed findings")
 
     def fail(self, message: str) -> None:
         notes = "".join(f"\n\n> {n}" for n in self.health_notes)
@@ -575,20 +749,31 @@ class Reviewer:
                 self.tmp = Path(tmp)
                 self.work = self.tmp / "empty"
                 self.work.mkdir()
+                with group("Checking for an earlier review"):
+                    self.plan_followup()
                 with group("Choosing review tier"):
                     decision = self.choose_tier(self.work)
                     log(f"Tier: {decision.tier} ({decision.source}: {decision.reason})")
                     self.result.tier = {"name": decision.tier, "source": decision.source, "reason": decision.reason}
                     self.progress.tier(decision.tier, decision.reason, decided_by=decision.source)
                     self.plan_security()
+                    recheck = ["followup"] if self.followup and self.followup.to_check() else []
                     if decision.tier != "full":
-                        self.progress.plan([decision.tier] + (["security"] if self.sec.dedicated else []) + ["verify", "post"])
-                snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") else None
-                with group(f"{decision.tier.capitalize()} review"):
-                    if decision.tier == "full":
-                        outcome = self.review_full(snapshot)
-                    else:
-                        outcome = self.review_single(decision.tier, self.work, snapshot)
+                        self.progress.plan(recheck + [decision.tier] + (["security"] if self.sec.dedicated else [])
+                                           + ["verify", "post"])
+                    elif recheck:
+                        self.progress.plan(recheck)
+                snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") or recheck else None
+                # Earlier findings are re-checked while the new commits are reviewed.
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    rechecking = pool.submit(self.check_previous) if recheck else None
+                    with group(f"{decision.tier.capitalize()} review"):
+                        if decision.tier == "full":
+                            outcome = self.review_full(snapshot, decision)
+                        else:
+                            outcome = self.review_single(decision.tier, self.work, snapshot)
+                    if self.followup:
+                        self.followup.apply(rechecking.result() if rechecking else None)
                 self.publish(decision, outcome)
             status, error = "completed", None
             return 0

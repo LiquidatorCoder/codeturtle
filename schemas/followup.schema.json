@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "previous"],
+  "properties": {
+    "summary": { "type": "string", "description": "One sentence on how the earlier findings were handled." },
+    "previous": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "line", "note"],
+        "properties": {
+          "id": { "type": "string", "description": "The earlier finding's id, e.g. ct-0123456789ab." },
+          "status": { "type": "string", "enum": ["fixed", "open", "obsolete"] },
+          "line": {
+            "type": "integer",
+            "description": "Open findings: the current new-file line (R number). Otherwise 0."
+          },
+          "note": { "type": "string", "description": "Fixed or obsolete: what changed. Open: why it still applies." }
+        }
+      }
+    }
+  }
+}

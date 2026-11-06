@@ -542,7 +542,8 @@ class Report:
             line = "**Security:** checked by the main review" + (f" ({self.skipped})" if self.skipped else "")
         if not self.candidates:
             return line + " · no issues found"
-        line += f" · {self.confirmed} confirmed · {len(self.leads)} need validation · {self.rejected} rejected"
+        needs = "needs" if len(self.leads) == 1 else "need"
+        line += f" · {self.confirmed} confirmed · {len(self.leads)} {needs} validation · {self.rejected} rejected"
         if self.verified:
             line += " by an independent check"
         elif self.verified is False:

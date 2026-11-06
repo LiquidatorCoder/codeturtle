@@ -278,7 +278,7 @@ class SchemaTests(unittest.TestCase):
             if node.get("type") == "array":
                 walk(node["items"])
 
-        for name in ("review", "triage", "security", "verify"):
+        for name in ("review", "triage", "security", "verify", "followup"):
             walk(json.loads((providers.SCHEMA_DIR / f"{name}.schema.json").read_text()))
 
 

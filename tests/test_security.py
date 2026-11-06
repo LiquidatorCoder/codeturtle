@@ -126,11 +126,11 @@ class ReportTests(unittest.TestCase):
                               leads=[{"path": "a.yml", "line": 4, "title": "Fork code with secrets?",
                                       "attack_class": "ci", "unresolved": "is the fork-PR approval required?"}])
         self.assertEqual(rep.summary_line(), "**Security:** dedicated pass (Supply chain, CI and release) · "
-                                             "1 confirmed · 1 need validation · 1 rejected by an independent check")
+                                             "1 confirmed · 1 needs validation · 1 rejected by an independent check")
         body = post.build_body(tier="fast", tier_reason="r", reviewers="Codex", summary="s", findings=[], inline=[],
                                rest=[], head_sha="a" * 40, notes=[], security=rep)
         self.assertIn(rep.summary_line(), body)
-        self.assertIn("Security leads that need validation (1)", body)
+        self.assertIn("Need validation (1)", body)
         self.assertIn("Check: is the fork-PR approval required?", body)
         quiet = security.Report(skipped="only docs or assets changed")
         self.assertEqual(quiet.summary_line(),
@@ -177,10 +177,11 @@ class ReviewFlowTests(unittest.TestCase):
         gh = mock.patch.multiple(github, get_pr=mock.DEFAULT, file_at_ref=mock.DEFAULT, get_files=mock.DEFAULT,
                                  post_comment=mock.DEFAULT, edit_comment=mock.DEFAULT, delete_comment=mock.DEFAULT,
                                  list_comments=mock.DEFAULT, post_review=mock.DEFAULT,
+                                 list_reviews=mock.DEFAULT,
                                  download_snapshot=mock.DEFAULT)
         found = {n: health.Health(n, "ok") for n in ("codex", "grok", "claude")}
         with gh as m, mock.patch.object(health, "check_all", return_value=found), \
-                mock.patch.dict(providers.RUNNERS, {"codex": codex, "grok": never, "claude": never}, clear=True), \
+                mock.patch.dict(providers.RUNNERS, {"codex": codex, "grok": codex, "claude": codex}, clear=True), \
                 mock.patch.object(review_mod, "log", lambda msg: None):
             os.environ.pop("GITHUB_STEP_SUMMARY", None)
             m["get_pr"].return_value = self.PR
@@ -188,6 +189,7 @@ class ReviewFlowTests(unittest.TestCase):
             m["get_files"].return_value = files
             m["post_comment"].return_value = 11
             m["list_comments"].return_value = []
+            m["list_reviews"].return_value = []
             m["post_review"].return_value = {"id": 5, "html_url": "https://example.test/review/5"}
             m["download_snapshot"].side_effect = self.fake_snapshot
             code = Reviewer(Request("o/r", 1, "dispatch", tier)).run()
@@ -221,7 +223,7 @@ class ReviewFlowTests(unittest.TestCase):
         self.assertTrue(self.calls[-1][2])  # the verifier reads the (lazily downloaded) snapshot
         self.assertIn("SQL injection in search", body)
         self.assertNotIn("SQL from user input", body)  # the main pass's duplicate on the same line
-        self.assertIn("1 confirmed · 1 need validation · 0 rejected by an independent check", body)
+        self.assertIn("1 confirmed · 1 needs validation · 0 rejected by an independent check", body)
         self.assertIn("which role reaches /admin?", body)
         sec = result["security"]
         self.assertEqual((sec["candidates"], sec["confirmed"], sec["verified"]), (2, 1, True))

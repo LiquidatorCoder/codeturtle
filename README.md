@@ -11,6 +11,10 @@ subscriptions already logged in on that Mac.
 - **Health-checked:** every review first checks that each CLI is installed and logged in, and names
   a broken backup on the PR before it is needed (see [Provider health](#provider-health-12)).
 - **Three tiers:** `fast`, `normal`, `full`. Picked automatically, or forced with a label or comment.
+- **Verified before posting:** every blocker and major is re-checked by a different provider, which
+  drops or downgrades what it can't confirm (see [Verification and follow-ups](#verification-and-follow-ups-14)).
+- **Follow-ups, not repeats:** a second review of a PR looks only at the new commits, says what was
+  fixed, still open and new, and resolves the threads of fixed findings.
 - **Security on every review:** a dedicated security pass and an independent verifier, using rules
   adapted from Cloudflare's [security-audit skill](https://github.com/cloudflare/security-audit-skill)
   (see [Security review](#security-review-13)).
@@ -23,8 +27,10 @@ subscriptions already logged in on that Mac.
 1. **Override** (wins outright): a `/review fast|normal|full` comment, a `review:<tier>` label, or the
    `tier` input.
 2. **Rule floor** (no model): any changed file under `full_paths` → full; more than
-   `full_if_lines_over` changed lines → full; only docs or assets, or under `fast_if_lines_under` lines
-   → fast; otherwise normal. Generated and lock files (`ignore_paths`) don't count.
+   `full_if_lines_over` changed production lines → full; only tests, docs or assets, or under
+   `fast_if_lines_under` production lines → fast; otherwise normal. Production lines leave out tests
+   and fixtures (`test_paths`), docs and assets (`fast_paths`) and generated or lock files
+   (`ignore_paths`).
 3. **Triage** (cheap, low effort): the model sees the title, description and file list and may
    **raise** the floor, never lower it. A PR description saying "trivial, fast is fine" can't push
    an auth change down to a fast review.
@@ -55,11 +61,50 @@ log prints an elapsed-time heartbeat every 30 seconds. Typical durations: fast 1
 3–5 min, full 4–6 min (its three passes run in parallel; set `full_parallel: 1` to run them in turn).
 
 It runs when a PR is opened, reopened or marked ready (not on every push, to save quota). To review
-again, comment `/review` or `/review full`. Only owners, members and collaborators can trigger it.
+again, comment `/review` or `/review full`: that reviews only the commits since the last review (a
+follow-up). `/review fresh` (or `/review fresh full`) reviews the whole PR again. Only owners, members and collaborators can trigger it.
 Add the `codeturtle:skip` label to skip the automatic run.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
+
+## Verification and follow-ups (1.4)
+
+- **Blockers and majors are verified before posting.** In the harness every blocker or major is
+  fixed automatically and nothing reviews the fix, so a wrong finding becomes an unreviewed change.
+  One extra call, on a provider other than the one that wrote the findings when one is healthy,
+  re-reads the code for each blocker and major (`verify.severities`) and tries to refute it.
+  - **Confirmed** findings are posted, never above the severity it confirmed.
+  - **Rejected** findings are dropped.
+  - Findings that **hinge on a fact outside the repo** become leads with no severity.
+  The same call verifies the security candidates. Minors and nits are posted as written. The review
+  shows `Verified by Claude (claude-opus-5-5): 3 blocker and major findings · 2 confirmed · 1 dropped`.
+- **Follow-up reviews.** Each review hides its state in its body: the reviewed commit and its findings
+  with ids. Each inline comment carries its finding's id. When the PR is reviewed again and its new
+  head descends from that commit, codeturtle:
+  - reviews only the PR files changed since;
+  - re-checks the earlier findings in those files, at the same time;
+  - reports `Since abc1234: ✅ 3 fixed · 🔁 1 still open · 🆕 2 new`;
+  - lists still-open findings instead of re-posting them;
+  - replies to and resolves the threads of fixed ones.
+  Ids are carried forward, so they survive line moves, and `result.json` `findings` is the current
+  state (open plus new). A rewritten history (force push), `/review fresh`, the `fresh` input or
+  `"incremental": false` reviews the whole PR. Only the workflow bot's own reviews count as state.
+- **Less quota per review.**
+  - Only production lines count toward the size rules.
+  - When the rules choose `full` only because some files are sensitive (`tiers.split_full`), those
+    files get the full passes and the rest one normal-depth pass. The security pass still sees
+    everything.
+  - The merge step runs at low effort.
+- **How often findings get fixed:**
+
+  ```bash
+  python3 -m codeturtle stats --repo LiquidatorCoder/swole --repo LiquidatorCoder/edie --prs 50
+  ```
+
+  It reports the share of inline findings that were addressed (the line changed in a later commit,
+  or the thread was resolved) by severity, category, tier, codeturtle version and repository. Use it
+  to measure prompt, tier or model changes.
 
 ## Security review (1.3)
 
@@ -133,7 +178,9 @@ which providers ran (and how many model calls), the summary, every finding with 
 (`ct-` + 12 hex of path, line, severity, title) and where it was posted, `findings_total` and
 per-severity `counts`, and the posted review's id/URL. Since 1.2 it also has `retry_at` (for
 `usage_limited`: the earliest reset a provider reported) and, under `reviewers`, `limits`,
-`unavailable` and the health check's result per provider. Since 1.3, `security` holds the security
+`unavailable` and the health check's result per provider. Since 1.4, `verification` says what
+verification did to the blockers and majors, `followup` lists the fixed, still-open and obsolete ids
+of a follow-up, and a still-open earlier finding has `placement: "earlier"`. Since 1.3, `security` holds the security
 check's counts, whether it was verified, and its `needs_validation` leads (never in `findings`).
 These are additive, so `schema_version` stays 1. It is redacted like the PR review and never holds a token, an environment variable, a
 prompt or model reasoning. The PR review and inline
@@ -165,7 +212,10 @@ default list (they are not appended).
 |---|---|
 | `providers` | `["codex", "grok", "claude"]` |
 | `models` | `codex: gpt-6-sol`, `grok: grok-4.7`, `claude: claude-opus-5-5` |
-| `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `medium`, verify `medium` |
+| `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `low`, verify `medium` |
+| `verify.severities` | `["blocker", "major"]` (re-checked before posting; `[]` posts everything as written) |
+| `verify.different_provider` | `true` (verify on a provider other than the one that wrote the findings) |
+| `incremental` | `true` (a repeat review follows up on the last one; `/review fresh` overrides) |
 | `timeout_minutes` | triage 5, fast 10, normal 20, full 40 (per pass), merge 10, verify 15 |
 | `security.pass` | `auto` (dedicated pass unless only docs or assets changed), `always` or `off` |
 | `security.verify` | `true` (an independent call tries to refute each security finding before it is posted) |
@@ -174,7 +224,9 @@ default list (they are not appended).
 | `limit_wait_minutes` | 30 (when every reviewer is out, wait this long at most for a usage limit to reset; 0 fails at once) |
 | `tiers.full_paths` | auth, security, payments, billing, migrations, SQL, workflows, Dockerfile, plist/manifest |
 | `tiers.fast_paths` | Markdown, text, docs, images, LICENSE |
-| `tiers.full_if_lines_over` / `fast_if_lines_under` | 800 / 40 |
+| `tiers.full_if_lines_over` / `fast_if_lines_under` | 800 / 40 changed production lines |
+| `tiers.test_paths` | test dirs and `*_test.*`, `*.test.*`, `*.spec.*`, `test_*.py`, `*Tests.swift`, … (don't count toward size) |
+| `tiers.split_full` | `true` (full passes only for the sensitive files when they alone made it full) |
 | `ignore_paths` | lock files, generated Dart/Go/JS, snapshots |
 | `guideline_files` | `.github/codeturtle.md`, `AGENTS.md`, `CLAUDE.md` |
 | `max_inline_comments` | 25 |
@@ -190,6 +242,8 @@ repos on this Mac), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific 
 python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --dry-run
 python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --tier full --providers grok,claude --dry-run
 python3 -m codeturtle doctor
+python3 -m codeturtle stats --repo LiquidatorCoder/swole --prs 50
+python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --fresh --dry-run
 python3 -m unittest discover -s tests -t .
 ```
 

@@ -59,6 +59,17 @@ def api(path: str, *extra: str):
     return json.loads(gh(["api", path, *extra]))
 
 
+def graphql(query: str, retry: bool = True, **variables) -> dict:
+    """A GraphQL query or mutation; `retry=False` for a mutation that must not run twice."""
+    args = ["api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        args += ["-F" if isinstance(value, (bool, int)) else "-f", f"{key}={json.dumps(value) if isinstance(value, bool) else value}"]
+    data = json.loads(gh(args, retry=retry))
+    if data.get("errors"):
+        raise GitHubError("GraphQL: " + "; ".join(str(e.get("message", e)) for e in data["errors"])[:800])
+    return data.get("data") or {}
+
+
 def get_pr(repo: str, number: int) -> dict:
     return api(f"repos/{repo}/pulls/{number}")
 
@@ -115,6 +126,46 @@ def delete_comment(repo: str, comment_id: int) -> None:
 def list_comments(repo: str, number: int) -> list[dict]:
     pages = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
     return [item for page in pages for item in page]
+
+
+def list_reviews(repo: str, number: int) -> list[dict]:
+    pages = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/reviews?per_page=100"]))
+    return [item for page in pages for item in page]
+
+
+def compare(repo: str, base: str, head: str) -> dict:
+    """What changed from `base` to `head`: status (ahead, behind, diverged, identical) and files."""
+    return api(f"repos/{repo}/compare/{base}...{head}")
+
+
+THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes { id isResolved comments(first: 1) { nodes { databaseId body author { login } } } }
+      }
+    }
+  }
+}
+"""
+
+
+def review_threads(repo: str, number: int) -> list[dict]:
+    owner, name = repo.split("/", 1)
+    data = graphql(THREADS_QUERY, owner=owner, name=name, number=number)
+    pr = (data.get("repository") or {}).get("pullRequest") or {}
+    return (pr.get("reviewThreads") or {}).get("nodes") or []
+
+
+def resolve_thread(thread_id: str) -> None:
+    graphql("mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+            id=thread_id)
+
+
+def reply_to_comment(repo: str, number: int, comment_id: int, body: str) -> None:
+    gh(["api", "-X", "POST", f"repos/{repo}/pulls/{number}/comments/{comment_id}/replies", "--input", "-"],
+       stdin=json.dumps({"body": body}))
 
 
 def react(repo: str, comment_id: int, content: str) -> None:

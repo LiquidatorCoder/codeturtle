@@ -23,6 +23,9 @@ on:
       request_id:
         description: caller's correlation id, echoed in the result artifact
         required: false
+      fresh:
+        description: review the whole PR instead of following up on the last review (true/false)
+        required: false
 
 permissions:
   contents: read
