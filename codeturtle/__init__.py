@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # Version of the machine-readable result (`codeturtle-result-attempt-<n>` artifact); see result.py.
 # New fields are added without bumping it; a bump means an existing field changed meaning.
