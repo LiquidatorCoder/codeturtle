@@ -409,7 +409,8 @@ class ReviewerTests(TempHome):
 
     def test_broken_backup_is_named_on_the_review(self):
         def codex(call, model):
-            return {"tier": "fast", "reason": "small"} if call.schema == "triage" else OK
+            answers = {"triage": {"tier": "fast", "reason": "small"}, "security": {"summary": "s", "candidates": []}}
+            return answers.get(call.schema, OK)
 
         def never(call, model):
             raise AssertionError("not needed")

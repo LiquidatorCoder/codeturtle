@@ -12,14 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import github, health, limits, post, prompts
+from . import github, health, limits, post, prompts, security
 from . import max_tier, state_dir
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
 from .events import Request
 from .progress import Progress
 from .providers import AllLimited, Call, Chain, ProviderError, Unavailable, kill_all, label
-from .result import ResultWriter, iso, with_ids
+from .result import ResultWriter, finding_id, iso, with_ids
 from .tiers import TierDecision, combine, floor_tier, label_override, raise_floor
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
@@ -122,6 +122,11 @@ class Reviewer:
         self.result = ResultWriter(req)
         self.health: dict[str, health.Health] = {}
         self.health_notes: list[str] = []  # broken providers, with the fix; shown on the PR
+        self.sec = security.Report()  # what this review's security check did
+        self.companions: list[security.Companion] = []
+        self.security_notes: dict[str, str] = {}  # the repo's own security rules (base branch)
+        self.tmp: Path | None = None
+        self.snapshot: Path | None = None
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -181,7 +186,29 @@ class Reviewer:
             text = github.file_at_ref(req.repo, path, base_sha)
             if text and text.strip():
                 self.guidelines[path] = text[:20_000]
+        for path in self.cfg["security"].get("rules_files", []):
+            text = github.file_at_ref(req.repo, path, base_sha)
+            if text and text.strip():
+                self.security_notes[path] = text[:20_000]
         return None
+
+    def plan_security(self) -> None:
+        """Pick the domain checks for this change and decide whether a dedicated security pass
+        runs (every review, unless the change is docs or assets only, or the config turns it off)."""
+        cfg = self.cfg["security"]
+        self.companions = security.select_companions(self.files, int(cfg.get("max_companions", 4)))
+        self.sec.companions = [c.title for c in self.companions]
+        reviewed = [f for f in self.files if not f.ignored]
+        docs_only = not reviewed or all(matches_any(f.path, self.cfg["tiers"]["fast_paths"]) for f in reviewed)
+        mode = str(cfg.get("pass", "auto")).lower()
+        if mode == "off":
+            self.sec.skipped = "the dedicated pass is turned off in the config"
+        elif mode == "auto" and docs_only:
+            self.sec.skipped = "only docs or assets changed"
+        else:
+            self.sec.dedicated = True
+        log("Security: " + ("dedicated pass" if self.sec.dedicated else f"main review only ({self.sec.skipped})")
+            + (f"; domain checks: {', '.join(self.sec.companions)}" if self.sec.companions else ""))
 
     # ---- providers ---------------------------------------------------------------------------
 
@@ -236,19 +263,52 @@ class Reviewer:
 
     # ---- passes ------------------------------------------------------------------------------
 
-    def call(self, kind: str, tier: str, prompt: str, cwd: Path, read_repo: bool = False) -> dict:
-        effort_key = "merge" if kind == "merge" else tier
+    def call(self, kind: str, effort_key: str, prompt: str, cwd: Path, read_repo: bool = False,
+             schema: str = "review", wait: bool = True) -> dict:
+        """One model call. `wait=False` for a step with its own fallback (merge, verify): it never
+        waits for a usage limit to reset."""
         data = self.chain.run(Call(
             kind=kind,
             prompt=prompt,
-            schema="review",
+            schema=schema,
             cwd=str(cwd),
             effort=self.cfg["effort"][effort_key],
             timeout_s=self.cfg["timeout_minutes"][effort_key] * 60,
             read_repo=read_repo,
-        ), wait=kind != "merge").data  # the merge has a model-free fallback: never wait for it
+        ), wait=wait).data
         self.progress.done(kind)
         return data
+
+    def run_jobs(self, jobs: list[tuple[str, callable, bool]]) -> dict:
+        """Run (key, call, optional) jobs, up to `full_parallel` at once. A required job's failure
+        stops the others and is raised; an optional job's failure is returned as its result."""
+        workers = max(1, min(int(self.cfg["full_parallel"]), len(jobs)))
+        results = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [(key, pool.submit(fn), optional) for key, fn, optional in jobs]
+            try:
+                for key, future, optional in futures:  # in order; raises the first required failure
+                    try:
+                        results[key] = future.result()
+                    except Exception as e:
+                        if not optional:
+                            raise
+                        log(f"[{key}] failed ({e}); continuing without it")
+                        results[key] = e
+            except BaseException:
+                for _, future, _ in futures:
+                    future.cancel()
+                kill_all()  # stop sibling passes instead of waiting for them
+                raise
+        return results
+
+    def ensure_snapshot(self) -> Path:
+        """The sanitized repository snapshot at the PR head, downloaded on first use."""
+        if self.snapshot is None:
+            with group("Downloading repository snapshot"):
+                self.snapshot = github.download_snapshot(self.req.repo, self.head_sha, self.tmp / "repo")
+                sanitize_snapshot(self.snapshot)
+        return self.snapshot
 
     def context_files(self, snapshot: Path) -> dict[str, str]:
         out, used = {}, 0
@@ -280,44 +340,58 @@ class Reviewer:
             context_files=self.context_files(snapshot) if (tier == "normal" and snapshot) else None,
             notes=notes,
         )
-        data = self.call(tier, tier, prompt, work)
-        return Outcome(data["summary"], data["findings"], notes)
+        jobs = [("main", lambda: self.call(tier, tier, prompt, work), False)]
+        if self.sec.dedicated:
+            # Fast reviews have only the diff; normal ones let the security pass read the snapshot.
+            sec_prompt = security.pass_prompt(
+                pr=self.pr, depth="repo" if snapshot else "fast", diff_text=diff_text,
+                companions=self.companions, notes=self.security_notes, extra=notes,
+            )
+            jobs.append(("security", lambda: self.call(
+                "security", tier, sec_prompt, snapshot or work, read_repo=snapshot is not None, schema="security"), True))
+        results = self.run_jobs(jobs)
+        data = results["main"]
+        findings = self.check_security(data["findings"], results.get("security"), "security", tier, snapshot)
+        return Outcome(data["summary"], findings, notes)
 
     def review_full(self, snapshot: Path) -> Outcome:
         chunks = chunk_files(self.files, self.cfg["diff_budget_chars"])
-        passes = []
+        passes = []  # (kind, prompt, schema, optional)
+
+        def review_pass(kind, focus, diff_text, notes):
+            prompt = prompts.review_prompt(pr=self.pr, tier="full", diff_text=diff_text, focus=focus,
+                                           guidelines=self.guidelines, notes=notes)
+            passes.append((kind, prompt, "review", False))
+
+        def security_pass(diff_text, notes):
+            if self.sec.dedicated:
+                prompt = security.pass_prompt(pr=self.pr, depth="repo", diff_text=diff_text, companions=self.companions,
+                                              notes=self.security_notes, extra=notes)
+                passes.append(("full:security", prompt, "security", True))
+
         if len(chunks) == 1:
             diff_text, _ = render_diff(chunks[0], self.cfg["diff_budget_chars"])
-            for focus in ("correctness", "security", "tests"):
-                passes.append((f"full:{focus}", focus, diff_text, []))
+            review_pass("full:correctness", "correctness", diff_text, [])
+            security_pass(diff_text, [])
+            review_pass("full:tests", "tests", diff_text, [])
         else:
             for i, chunk in enumerate(chunks, 1):
                 diff_text, _ = render_diff(chunk, self.cfg["diff_budget_chars"])
                 note = (f"The diff is large, so it is reviewed in {len(chunks)} parts. This is part {i}; "
                         "other files are reviewed separately but you may read them for context.")
-                passes.append((f"full:part{i}", "all", diff_text, [note]))
-        self.progress.plan([kind for kind, *_ in passes] + ["merge", "post"], parts=len(chunks))
+                review_pass(f"full:part{i}", "all", diff_text, [note])
+            security_pass(*self.security_diff())
+        self.progress.plan([kind for kind, *_ in passes] + ["verify", "merge", "post"], parts=len(chunks))
 
-        def run_pass(spec):
-            kind, focus, diff_text, notes = spec
-            prompt = prompts.review_prompt(
-                pr=self.pr, tier="full", diff_text=diff_text, focus=focus,
-                guidelines=self.guidelines, notes=notes,
-            )
-            return self.call(kind, "full", prompt, snapshot, read_repo=True)
-
-        workers = max(1, min(int(self.cfg["full_parallel"]), len(passes)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(run_pass, spec) for spec in passes]
-            try:
-                results = [f.result() for f in futures]  # keeps pass order; raises the first failure
-            except BaseException:
-                for f in futures:
-                    f.cancel()
-                kill_all()  # stop sibling passes instead of waiting for them
-                raise
-        summaries = [r["summary"] for r in results]
-        findings = [item for r in results for item in r["findings"]]
+        results = self.run_jobs([
+            (kind, (lambda kind=kind, prompt=prompt, schema=schema:
+                    self.call(kind, "full", prompt, snapshot, read_repo=True, schema=schema)), optional)
+            for kind, prompt, schema, optional in passes
+        ])
+        reviews = [results[kind] for kind, _, schema, _ in passes if schema == "review"]
+        summaries = [r["summary"] for r in reviews]
+        findings = [item for r in reviews for item in r["findings"]]
+        findings = self.check_security(findings, results.get("full:security"), "full:security", "full", snapshot)
 
         notes = [f"Reviewed in {len(chunks)} parts because of its size."] if len(chunks) > 1 else []
         if not findings:
@@ -325,11 +399,92 @@ class Reviewer:
             return Outcome(summaries[0], [], notes)
         try:
             merge_prompt = prompts.merge_prompt(pr=self.pr, summaries=summaries, findings=findings)
-            merged = self.call("merge", "full", merge_prompt, self.work)
+            merged = self.call("merge", "merge", merge_prompt, self.work, wait=False)
             return Outcome(merged["summary"], merged["findings"], notes)
         except (ProviderError, AllLimited) as e:
             log(f"[merge] failed ({e}); merging passes without a model")
             return Outcome(summaries[0], findings, notes)
+
+    def security_diff(self) -> tuple[str, list[str]]:
+        """For a diff too large for one pass: the most security-relevant files first (sensitive
+        paths, then files a domain check selected), within the budget."""
+        sensitive = self.cfg["tiers"]["full_paths"]
+
+        def rank(f: FileChange) -> int:
+            if matches_any(f.path, sensitive):
+                return 0
+            text = security.added_text(f)
+            return 1 if any(matches_any(f.path, list(c.paths)) or c.content.search(text) for c in self.companions) else 2
+
+        files = sorted((f for f in self.files if not f.ignored), key=rank)
+        diff_text, omitted = render_diff(files, self.cfg["diff_budget_chars"])
+        notes = ["The diff is too large for one pass, so this security pass sees the most security-relevant "
+                 "files first. You may read every other file in the snapshot."]
+        if omitted:
+            notes.append(f"{len(omitted)} lower-priority files did not fit: " + ", ".join(omitted[:10])
+                         + (" ..." if len(omitted) > 10 else ""))
+        return diff_text, notes
+
+    def check_security(self, findings: list, pass_result, pass_kind: str, tier: str, snapshot: Path | None) -> list:
+        """Verify every security candidate (the dedicated pass's, plus security findings from the
+        other passes) and return the findings to post: the non-security ones plus the confirmed."""
+        rep = self.sec
+        if isinstance(pass_result, Exception):
+            rep.notes.append(f"The dedicated security pass failed ({pass_result}), so only the main review "
+                             "checked security.")
+            self.progress.fail(pass_kind)
+            pass_result = None
+        others = [f for f in findings if not security.is_security(f)]
+        raw = list((pass_result or {}).get("candidates") or [])
+        raw += security.from_findings([f for f in findings if security.is_security(f)])
+        candidates = security.normalize(raw)
+        rep.candidates = len(candidates)
+        if not candidates:
+            self.progress.skip("verify")
+            return others
+        if not self.cfg["security"].get("verify", True):
+            confirmed, rep.leads = security.unverified(candidates)
+            rep.verified = False
+            self.progress.skip("verify")
+        else:
+            try:
+                snapshot = snapshot or self.ensure_snapshot()
+                cited = {c["path"] for c in candidates}
+                diff_text, _ = render_diff([f for f in self.files if f.path in cited] or self.files,
+                                           self.cfg["context_budget_chars"])
+                prompt = security.verify_prompt(pr=self.pr, candidates=candidates, diff_text=diff_text,
+                                                notes=self.security_notes)
+                data = self.call("verify", "verify", prompt, snapshot, read_repo=True, schema="verify", wait=False)
+                confirmed, rep.leads, rep.rejected = security.apply_verdicts(candidates, data["verdicts"])
+                rep.verified = True
+            except (ProviderError, AllLimited, github.GitHubError) as e:
+                log(f"[verify] failed ({e}); posting the security candidates unverified")
+                confirmed, rep.leads = security.unverified(candidates)
+                rep.verified = False
+                rep.notes.append(f"The security findings were not independently verified ({e}).")
+                self.progress.fail("verify")
+        if tier == "fast":  # a fast review posts only blockers and majors
+            confirmed = [f for f in confirmed if f["severity"] in ("blocker", "major")]
+        rep.confirmed = len(confirmed)
+        return others + confirmed
+
+    def security_result(self) -> dict:
+        rep = self.sec
+        return {
+            "dedicated_pass": rep.dedicated,
+            "skipped": rep.skipped,
+            "companions": list(rep.companions),
+            "candidates": rep.candidates,
+            "confirmed": rep.confirmed,
+            "rejected": rep.rejected,
+            "verified": rep.verified,
+            "needs_validation": [{
+                "id": finding_id({**lead, "severity": "needs_validation"}),
+                "path": lead["path"], "line": lead["line"], "attack_class": lead["attack_class"],
+                "title": post.redact(lead["title"]), "unresolved": post.redact(lead["unresolved"]),
+            } for lead in rep.leads],
+            "notes": [post.redact(n) for n in rep.notes],
+        }
 
     # ---- output ------------------------------------------------------------------------------
 
@@ -348,15 +503,17 @@ class Reviewer:
     def publish(self, decision: TierDecision, outcome: Outcome) -> None:
         findings = post.normalize(outcome.findings, decision.tier)
         inline, rest = post.split_inline(findings, self.files, self.cfg["max_inline_comments"])
-        notes = self.health_notes + outcome.notes
+        notes = self.health_notes + self.sec.notes + outcome.notes
         body_args = dict(
             tier=decision.tier, tier_reason=decision.reason, reviewers=self.reviewers(),
             summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=notes,
+            security=self.sec,
         )
         payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
         self.result.summary = outcome.summary
         self.result.notes = list(notes)
         self.result.findings = with_ids(findings, inline)
+        self.result.security = self.security_result()
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
         if self.dry_run:
@@ -415,20 +572,18 @@ class Reviewer:
             max_parallel = int(os.environ.get("CODETURTLE_MAX_PARALLEL", "1"))
             on_wait = lambda: self.progress.note("Waiting for another codeturtle review on this Mac to finish.")
             with review_slot(max_parallel, 90, on_wait), tempfile.TemporaryDirectory(prefix="codeturtle-") as tmp:
-                self.work = Path(tmp) / "empty"
+                self.tmp = Path(tmp)
+                self.work = self.tmp / "empty"
                 self.work.mkdir()
                 with group("Choosing review tier"):
                     decision = self.choose_tier(self.work)
                     log(f"Tier: {decision.tier} ({decision.source}: {decision.reason})")
                     self.result.tier = {"name": decision.tier, "source": decision.source, "reason": decision.reason}
                     self.progress.tier(decision.tier, decision.reason, decided_by=decision.source)
+                    self.plan_security()
                     if decision.tier != "full":
-                        self.progress.plan([decision.tier, "post"])
-                snapshot = None
-                if decision.tier in ("normal", "full"):
-                    with group("Downloading repository snapshot"):
-                        snapshot = github.download_snapshot(self.req.repo, self.head_sha, Path(tmp) / "repo")
-                        sanitize_snapshot(snapshot)
+                        self.progress.plan([decision.tier] + (["security"] if self.sec.dedicated else []) + ["verify", "post"])
+                snapshot = self.ensure_snapshot() if decision.tier in ("normal", "full") else None
                 with group(f"{decision.tier.capitalize()} review"):
                     if decision.tier == "full":
                         outcome = self.review_full(snapshot)

@@ -135,9 +135,9 @@ class Unavailable(ProviderError):
 
 @dataclass
 class Call:
-    kind: str  # triage | fast | normal | full | merge
+    kind: str  # triage | fast | normal | full:<focus> | security | verify | merge
     prompt: str
-    schema: str  # "review" or "triage"
+    schema: str  # "review", "triage", "security" or "verify" (schemas/<name>.schema.json)
     cwd: str
     effort: str
     timeout_s: int
@@ -336,6 +336,10 @@ def valid(schema: str, data: dict | None) -> bool:
         return False
     if schema == "triage":
         return isinstance(data.get("tier"), str) and isinstance(data.get("reason"), str)
+    if schema == "security":
+        return isinstance(data.get("summary"), str) and isinstance(data.get("candidates"), list)
+    if schema == "verify":
+        return isinstance(data.get("verdicts"), list)
     return isinstance(data.get("summary"), str) and isinstance(data.get("findings"), list)
 
 

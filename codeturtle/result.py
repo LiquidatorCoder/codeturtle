@@ -87,6 +87,7 @@ class ResultWriter:
         self.review: dict | None = None
         self.reviewers: dict = {"providers_used": [], "models": {}, "usage_limited": [], "calls": 0}
         self.retry_at: str | None = None  # status usage_limited: earliest reported limit reset
+        self.security: dict | None = None  # 1.3: what the security check did, incl. needs_validation leads
 
     def set_pr(self, raw: dict) -> None:
         base, head = raw.get("base") or {}, raw.get("head") or {}
@@ -121,6 +122,7 @@ class ResultWriter:
             "findings_total": len(self.findings),
             "counts": counts,
             "notes": [redact(n) for n in self.notes],
+            "security": self.security if status == "completed" else None,
             "review": self.review,
             "started_at": iso(self.started),
             "finished_at": iso(time.time()),

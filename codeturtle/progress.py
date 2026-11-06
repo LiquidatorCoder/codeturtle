@@ -28,6 +28,8 @@ def step_label(kind: str, parts: int = 0) -> str:
         "full:correctness": "Correctness pass",
         "full:security": "Security pass",
         "full:tests": "Tests pass",
+        "security": "Security pass",
+        "verify": "Verify security findings",
         "merge": "Merge findings",
         "post": "Post review",
     }.get(kind, kind)
@@ -103,6 +105,13 @@ class Progress:
             self._step(kind)["state"] = "skipped"
         self.push()
 
+    def fail(self, kind: str) -> None:
+        """An optional step that failed while the review carried on without it."""
+        with self.lock:
+            step = self._step(kind)
+            step["state"], step["t1"] = "failed", time.time()
+        self.push()
+
     def begin(self, kind: str, who: str) -> None:
         with self.lock:
             step = self._step(kind)
@@ -150,6 +159,8 @@ class Progress:
                     lines.append(f"- [x] {s['label']}{who} · {elapsed(s['t1'] - s['t0'])}")
                 elif s["state"] == "skipped":
                     lines.append(f"- [x] ~~{s['label']}~~ · not needed")
+                elif s["state"] == "failed":
+                    lines.append(f"- [ ] ~~{s['label']}~~ · failed, the review carries on without it")
                 elif s["state"] == "running":
                     lines.append(f"- [ ] **{s['label']}**{who} · running {elapsed(now - s['t0'])}")
                 else:
