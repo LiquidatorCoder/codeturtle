@@ -59,6 +59,17 @@ def api(path: str, *extra: str):
     return json.loads(gh(["api", path, *extra]))
 
 
+def graphql(query: str, retry: bool = True, **variables) -> dict:
+    """A GraphQL query or mutation; `retry=False` for a mutation that must not run twice."""
+    args = ["api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        args += ["-F" if isinstance(value, (bool, int)) else "-f", f"{key}={json.dumps(value) if isinstance(value, bool) else value}"]
+    data = json.loads(gh(args, retry=retry))
+    if data.get("errors"):
+        raise GitHubError("GraphQL: " + "; ".join(str(e.get("message", e)) for e in data["errors"])[:800])
+    return data.get("data") or {}
+
+
 def get_pr(repo: str, number: int) -> dict:
     return api(f"repos/{repo}/pulls/{number}")
 

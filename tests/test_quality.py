@@ -2,8 +2,9 @@
 blockers and majors, fix-rate stats, and incremental follow-up reviews."""
 
 import unittest
+from unittest import mock
 
-from codeturtle import security, verify
+from codeturtle import security, stats, verify
 from codeturtle.config import DEFAULTS
 from codeturtle.events import Request
 from codeturtle.providers import Chain
@@ -136,6 +137,31 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(run.call("verify")["provider"], "codex")
         self.assertIn("the same provider as the review", payload["body"])
         self.assertTrue(result["verification"]["same_provider"])
+
+
+class StatsTests(unittest.TestCase):
+    def thread(self, body, outdated=False, resolved=False, author="github-actions",
+               review="### 🐢 codeturtle · Full review\n\n<sub>codeturtle v1.3.0</sub>"):
+        return {"isOutdated": outdated, "isResolved": resolved, "comments": {"nodes": [
+            {"author": {"login": author}, "body": body, "pullRequestReview": {"body": review}}]}}
+
+    def test_counts_addressed_findings(self):
+        data = {"repository": {"pullRequests": {"nodes": [{"number": 3, "state": "MERGED", "reviewThreads": {"nodes": [
+            self.thread("🔴 **Major** · correctness — **Cursor leaks**\n\nbody", outdated=True),
+            self.thread("🟡 **Minor** · tests — **No test for empty input**"),
+            self.thread("🛑 **Blocker** · security — **SQL injection**", resolved=True),
+            self.thread("🔴 **Major** · correctness — **Not ours**", author="dev"),  # a human's thread
+            self.thread("just a reply"),
+        ]}}]}}}
+        with mock.patch.object(stats.github, "graphql", return_value=data):
+            records = stats.fetch("o/r", 10)
+        agg = stats.aggregate(records)
+        self.assertEqual((agg["posted"], agg["addressed"], agg["prs"]), (3, 2, 1))
+        self.assertEqual(agg["by_severity"][0], {"severity": "blocker", "posted": 1, "addressed": 1})
+        self.assertEqual(agg["by_version"], [{"version": "1.3.0", "posted": 3, "addressed": 2}])
+        text = stats.render(agg, ["o/r"], 10)
+        self.assertIn("Inline findings: 3 on 1 PRs · addressed 2 (67%)", text)
+        self.assertIn("tests", text)
 
 
 if __name__ == "__main__":

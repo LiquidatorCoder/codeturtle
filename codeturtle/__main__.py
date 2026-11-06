@@ -4,6 +4,7 @@
     python3 -m codeturtle review --repo owner/name --pr 12 \\
         [--tier fast|normal|full] [--providers codex,grok,claude] [--dry-run]
     python3 -m codeturtle doctor [--providers codex,grok,claude] # is every model CLI ready?
+    python3 -m codeturtle stats --repo owner/name [--prs 50]     # how often findings get addressed
 """
 
 from __future__ import annotations
@@ -66,11 +67,18 @@ def main(argv: list[str]) -> int:
     review.add_argument("--dry-run", action="store_true", help="write the review to out/ instead of posting")
     check = sub.add_parser("doctor", help="check that every model CLI is installed and logged in (exit 1 if not)")
     check.add_argument("--providers", help="comma-separated, default: codex,grok,claude")
+    stats = sub.add_parser("stats", help="how often findings get addressed, by severity, category, tier and version")
+    stats.add_argument("--repo", action="append", required=True, help="owner/name; repeat for several")
+    stats.add_argument("--prs", type=int, default=50, help="most recent PRs per repo (default 50, max 100)")
+    stats.add_argument("--json", action="store_true", help="print the numbers as JSON")
     args = parser.parse_args(argv)
     if args.command == "action":
         return action()
     if args.command == "doctor":
         return doctor(providers_arg(args.providers) or DEFAULTS["providers"], DEFAULTS["models"])
+    if args.command == "stats":
+        from .stats import main as stats_main
+        return stats_main(args.repo, max(1, min(args.prs, 100)), args.json)
     req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier)
     return Reviewer(req, providers_arg(args.providers), args.dry_run).run()
 
