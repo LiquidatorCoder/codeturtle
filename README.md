@@ -100,10 +100,13 @@ Nothing here is done by hand: releasing is merging a version bump, and every rep
   is behind the latest release (then nothing is written), so GitHub emails you. A template that fails
   the protocol check (`# codeturtle-protocol: 2`, one `@v1` action, the harness's dispatch inputs) is
   never rolled out.
-- **Its token.** The sync writes to other repositories, which a workflow's own `GITHUB_TOKEN` can't.
-  It uses the `CODETURTLE_FLEET_TOKEN` secret when set (a classic token with `repo` and `workflow`, or
-  a fine-grained one with Contents, Pull requests and Workflows read/write), else the runner's own
-  `gh` login. Both workflows run only main's code (no `pull_request` trigger).
+- **Its token.** The sync writes to other repositories, which a workflow's own `GITHUB_TOKEN` can't,
+  so it needs the `CODETURTLE_FLEET_TOKEN` secret: a fine-grained token for all your repositories with
+  Contents, Pull requests and Workflows read/write (or a classic one with `repo` and `workflow`, which
+  also reaches repositories you don't own). Jobs on the runners can't use your `gh` login, so without
+  the secret every run fails and says so. Set it with
+  `gh secret set CODETURTLE_FLEET_TOKEN -R LiquidatorCoder/codeturtle` (it asks for the value). Both
+  workflows run only main's code (no `pull_request` trigger).
 - **Mode.** `sync` (default) merges, `pr` leaves the PRs for you, `check` only reports: pick one when
   running it by hand (Actions → fleet → Run workflow), or set the repository variable
   `CODETURTLE_FLEET_MODE`.

@@ -39,8 +39,8 @@ jobs:
 
       - name: Sync every repository's workflow
         env:
-          # A token of yours that can write contents, pull requests and workflows in the repositories.
-          # Unset, `gh` uses the runner's own login (the runners run in your login session).
+          # Required: a token of yours that can write contents, pull requests and workflows in the
+          # repositories. Jobs on the runners can't use your `gh` login; without it the run fails and says so.
           GH_TOKEN: ${{ secrets.CODETURTLE_FLEET_TOKEN }}
           # Default `sync`; set the repository variable CODETURTLE_FLEET_MODE to `pr` or `check` to change it.
           MODE: ${{ inputs.mode || vars.CODETURTLE_FLEET_MODE || 'sync' }}
