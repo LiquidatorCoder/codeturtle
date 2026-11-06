@@ -49,6 +49,7 @@ Every tier also sends its security findings to an independent verifier before po
 
 1. Put the repo on the Mac runners: `macci add LiquidatorCoder/<repo>`.
 2. Copy [`examples/codeturtle.yml`](examples/codeturtle.yml) to `.github/workflows/codeturtle.yml`.
+   From then on it is kept current for you (see [Keeping every repo current](#keeping-every-repo-current)).
 3. Optional: add `.github/codeturtle.json` (see [`examples/codeturtle.json`](examples/codeturtle.json)),
    `.github/codeturtle.md` with review guidelines and `.github/codeturtle-security.md` with the repo's
    threat model (see [Security review](#security-review-13)). All are read from the **base** branch,
@@ -67,6 +68,51 @@ Add the `codeturtle:skip` label to skip the automatic run.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
+
+## Keeping every repo current
+
+Nothing here is done by hand: releasing is merging a version bump, and every repository follows.
+
+- **Code: the `v1` tag.** Repositories use `LiquidatorCoder/codeturtle@v1`.
+  [`release.yml`](.github/workflows/release.yml) runs on every push to main: when `__version__` in
+  [`codeturtle/__init__.py`](codeturtle/__init__.py) has no tag yet, it runs the tests, tags
+  `v<version>` (it must be newer than every release), points `v1` at it and publishes the GitHub
+  release. Every repository runs the new version on its next review. A push without a bump does
+  nothing; a `v1` left behind an existing release is moved on the next run. A new major (2.0.0) gets
+  `v2` and leaves `v1` alone. Releases used to be tagged by hand, which is how 1.2 and 1.3 never
+  reached the repositories.
+- **Workflow file: the fleet sync.** Each repository's `.github/workflows/codeturtle.yml` is a copy of
+  [`examples/codeturtle.yml`](examples/codeturtle.yml) and goes stale when the template changes (1.4
+  added the `fresh` input). [`fleet.yml`](.github/workflows/fleet.yml) runs daily and after every
+  release. It finds every repository you can see that has the file (no list to keep: a new repo is
+  picked up once the file is on its default branch) and compares it with the latest release's template:
+
+  | Workflow | What happens |
+  |---|---|
+  | in sync | nothing |
+  | outdated: an unmodified older template | a PR (`codeturtle/workflow-sync`, labelled `codeturtle:skip`) updates it and is merged at once. Its commits carry `[skip ci]`, so neither the PR nor the merge runs the repository's CI, deploys or a review |
+  | pinned: an older template on another ref (`@v1.1.0`, a SHA) | reported, never changed |
+  | customized: anything else | reported, never changed |
+  | opted out: the file has a `# codeturtle-sync: off` line | reported, never changed |
+
+  The job summary lists every repository with the version it runs, and the run fails when one needs
+  you (pinned, customized, public, no write access, an update or merge GitHub refused) or when `v1`
+  is behind the latest release (then nothing is written), so GitHub emails you. A template that fails
+  the protocol check (`# codeturtle-protocol: 2`, one `@v1` action, the harness's dispatch inputs) is
+  never rolled out.
+- **Its token.** The sync writes to other repositories, which a workflow's own `GITHUB_TOKEN` can't.
+  It uses the `CODETURTLE_FLEET_TOKEN` secret when set (a classic token with `repo` and `workflow`, or
+  a fine-grained one with Contents, Pull requests and Workflows read/write), else the runner's own
+  `gh` login. Both workflows run only main's code (no `pull_request` trigger).
+- **Mode.** `sync` (default) merges, `pr` leaves the PRs for you, `check` only reports: pick one when
+  running it by hand (Actions → fleet → Run workflow), or set the repository variable
+  `CODETURTLE_FLEET_MODE`.
+
+```bash
+python3 -m codeturtle fleet --mode check                 # what every repository runs, from a terminal
+python3 -m codeturtle fleet --mode pr --repo LiquidatorCoder/edie
+python3 -m codeturtle release --dry-run                  # what the next push to main would tag
+```
 
 ## Verification and follow-ups (1.4)
 
@@ -244,6 +290,7 @@ python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --tier full --
 python3 -m codeturtle doctor
 python3 -m codeturtle stats --repo LiquidatorCoder/swole --prs 50
 python3 -m codeturtle review --repo LiquidatorCoder/swole --pr 58 --fresh --dry-run
+python3 -m codeturtle fleet --mode check
 python3 -m unittest discover -s tests -t .
 ```
 
