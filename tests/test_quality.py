@@ -123,7 +123,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(run.call("normal")["provider"], "codex")
         self.assertEqual(run.call("verify")["provider"], "grok")
-        self.assertIn("**Verified by Grok (grok-4.7):** 1 blocker and major findings · 0 confirmed · 1 dropped",
+        self.assertIn("**Verified by Grok (grok-4.7):** 1 blocker or major finding · 0 confirmed · 1 dropped",
                       payload["body"])
         self.assertEqual([f["title"] for f in result["findings"]], ["Typo in log"])  # the minor is not checked
         self.assertEqual(result["verification"]["rejected"], 1)

@@ -113,18 +113,19 @@ class Report:
     def summary_line(self) -> str | None:
         if not self.checked:
             return None
+        what = "blocker or major finding" if self.checked == 1 else "blocker and major findings"
         if not self.provider:
-            return f"**Verified:** no, {self.checked} blocker and major findings are posted unchecked"
+            return f"**Verified:** no, {self.checked} {what} posted unchecked"
         parts = [f"{self.confirmed} confirmed"]
         if self.downgraded:
             parts.append(f"{self.downgraded} downgraded")
         parts.append(f"{self.rejected} dropped")
         if self.leads:
-            parts.append(f"{len(self.leads)} need validation")
+            parts.append(f"{len(self.leads)} {'needs' if len(self.leads) == 1 else 'need'} validation")
         if self.unchecked:
             parts.append(f"{self.unchecked} not checked")
         who = self.provider + (", the same provider as the review" if self.same_provider else "")
-        return f"**Verified by {who}:** {self.checked} blocker and major findings · " + " · ".join(parts)
+        return f"**Verified by {who}:** {self.checked} {what} · " + " · ".join(parts)
 
 
 def apply(bugs: list[dict], verdicts: dict[str, dict], report: Report) -> list[dict]:

@@ -126,7 +126,7 @@ class ReportTests(unittest.TestCase):
                               leads=[{"path": "a.yml", "line": 4, "title": "Fork code with secrets?",
                                       "attack_class": "ci", "unresolved": "is the fork-PR approval required?"}])
         self.assertEqual(rep.summary_line(), "**Security:** dedicated pass (Supply chain, CI and release) · "
-                                             "1 confirmed · 1 need validation · 1 rejected by an independent check")
+                                             "1 confirmed · 1 needs validation · 1 rejected by an independent check")
         body = post.build_body(tier="fast", tier_reason="r", reviewers="Codex", summary="s", findings=[], inline=[],
                                rest=[], head_sha="a" * 40, notes=[], security=rep)
         self.assertIn(rep.summary_line(), body)
@@ -223,7 +223,7 @@ class ReviewFlowTests(unittest.TestCase):
         self.assertTrue(self.calls[-1][2])  # the verifier reads the (lazily downloaded) snapshot
         self.assertIn("SQL injection in search", body)
         self.assertNotIn("SQL from user input", body)  # the main pass's duplicate on the same line
-        self.assertIn("1 confirmed · 1 need validation · 0 rejected by an independent check", body)
+        self.assertIn("1 confirmed · 1 needs validation · 0 rejected by an independent check", body)
         self.assertIn("which role reaches /admin?", body)
         sec = result["security"]
         self.assertEqual((sec["candidates"], sec["confirmed"], sec["verified"]), (2, 1, True))
