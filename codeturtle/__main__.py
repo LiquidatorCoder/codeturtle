@@ -5,6 +5,8 @@
         [--tier fast|normal|full] [--providers codex,grok,claude] [--dry-run]
     python3 -m codeturtle doctor [--providers codex,grok,claude] # is every model CLI ready?
     python3 -m codeturtle stats --repo owner/name [--prs 50]     # how often findings get addressed
+    python3 -m codeturtle fleet [--mode sync|pr|check]          # keep every repo's workflow current
+    python3 -m codeturtle release [--dry-run]                    # tag __version__, move the major tag
 """
 
 from __future__ import annotations
@@ -73,6 +75,15 @@ def main(argv: list[str]) -> int:
     stats.add_argument("--repo", action="append", required=True, help="owner/name; repeat for several")
     stats.add_argument("--prs", type=int, default=50, help="most recent PRs per repo (default 50, max 100)")
     stats.add_argument("--json", action="store_true", help="print the numbers as JSON")
+    fleet = sub.add_parser("fleet", help="find every repo with the codeturtle workflow and bring it to the latest template")
+    fleet.add_argument("--mode", choices=("sync", "pr", "check"), default="sync",
+                       help="sync: update outdated copies through a PR merged at once (default); "
+                            "pr: leave the PR open; check: only report")
+    fleet.add_argument("--owner", action="append", help="only this user's or organization's repos; repeat for several")
+    fleet.add_argument("--repo", action="append", help="only owner/name; repeat for several")
+    fleet.add_argument("--json", action="store_true", help="print the outcome as JSON")
+    rel = sub.add_parser("release", help="tag __version__ and point the major tag (v1) at the newest release")
+    rel.add_argument("--dry-run", action="store_true", help="print the plan; tag nothing")
     args = parser.parse_args(argv)
     if args.command == "action":
         return action()
@@ -81,6 +92,12 @@ def main(argv: list[str]) -> int:
     if args.command == "stats":
         from .stats import main as stats_main
         return stats_main(args.repo, max(1, min(args.prs, 100)), args.json)
+    if args.command == "fleet":
+        from .fleet import main as fleet_main
+        return fleet_main(args.mode, args.owner, args.repo, args.json)
+    if args.command == "release":
+        from .release import main as release_main
+        return release_main(args.dry_run)
     req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier, fresh=args.fresh)
     return Reviewer(req, providers_arg(args.providers), args.dry_run).run()
 
