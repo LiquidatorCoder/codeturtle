@@ -102,6 +102,7 @@ def build_body(
     rest: list[dict],
     head_sha: str,
     notes: list[str],
+    security=None,  # security.Report: the security check's summary line and leads
 ) -> str:
     lines = [
         f"### 🐢 codeturtle · {tier.capitalize()} review",
@@ -110,8 +111,11 @@ def build_body(
         "",
         f"**Tier:** {tier.capitalize()} — {tier_reason}  ",
         f"**Reviewed by:** {reviewers}  ",
-        f"**Findings:** {counts(findings)}" + (f" ({len(inline)} inline)" if findings else ""),
+        f"**Findings:** {counts(findings)}" + (f" ({len(inline)} inline)" if findings else "")
+        + ("  " if security else ""),
     ]
+    if security:
+        lines.append(security.summary_line())
     if not findings:
         lines += ["", "No issues found at this depth."]
     if rest:
@@ -121,6 +125,15 @@ def build_body(
             lines.append(f"- {ICON[f['severity']]} **{f['title']}** — {where}  ")
             if f["body"]:
                 lines.append("  " + f["body"].replace("\n", "\n  "))
+        lines += ["", "</details>"]
+    leads = list(getattr(security, "leads", None) or [])
+    if leads:
+        lines += ["", f"<details><summary>Security leads that need validation ({len(leads)}): "
+                      "not findings, no severity, each hangs on one fact outside the code</summary>", ""]
+        for lead in leads:
+            where = f"`{lead['path']}:{lead['line']}`" if lead["line"] else f"`{lead['path'] or 'general'}`"
+            lines.append(f"- 🔍 **{lead['title']}** — {where} · {lead['attack_class']}  ")
+            lines.append("  Check: " + lead["unresolved"].replace("\n", " "))
         lines += ["", "</details>"]
     for note in notes:
         lines += ["", f"> {note}"]

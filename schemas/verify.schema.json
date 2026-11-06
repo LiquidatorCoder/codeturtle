@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts"],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "severity", "reason", "unresolved", "fix"],
+        "properties": {
+          "id": { "type": "string", "description": "The candidate id, e.g. c1." },
+          "verdict": { "type": "string", "enum": ["confirmed", "needs_validation", "rejected"] },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "none"],
+            "description": "From the demonstrated impact for confirmed; none otherwise."
+          },
+          "reason": {
+            "type": "string",
+            "description": "confirmed: the path you verified. rejected: what refutes it."
+          },
+          "unresolved": { "type": "string", "description": "needs_validation: the exact missing fact. Otherwise empty." },
+          "fix": { "type": "string", "description": "confirmed: the smallest fix. Otherwise empty." }
+        }
+      }
+    }
+  }
+}

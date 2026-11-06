@@ -38,12 +38,17 @@ major and minor issues, plus nits that are clearly worth it.""",
 FOCUS = {
     "correctness": "Focus on correctness: logic errors, edge cases, error handling, concurrency, state "
     "and data integrity, API or contract breaks, and regressions for existing callers.",
-    "security": "Focus on security and safety: injection, authn/authz gaps, secrets, unsafe input "
-    "handling, permission or CI/workflow risks, privacy leaks, and dangerous defaults.",
     "tests": "Focus on tests and robustness: risky logic left untested, tests that do not assert what "
     "they claim, flaky patterns, and missing handling of failure paths.",
     "all": "Cover correctness, security and test gaps.",
 }
+
+# Every review applies this bar to security findings; the dedicated security pass (security.py)
+# goes further. Findings with category "security" are checked by an independent verifier.
+SECURITY_BAR = """Security findings (category security) must name the lower-trust actor and the input they
+control, the control that fails, the trust boundary crossed and the concrete impact on another user,
+tenant or resource. A missing best practice, a defense-in-depth gap behind another working control,
+self-impact or guessed deployment behaviour is not a security finding."""
 
 
 def untrusted(tag: str, text: str) -> str:
@@ -81,6 +86,7 @@ def review_prompt(
         PREAMBLE.format(number=pr["number"], repo=pr["repo"]),
         TIER_RULES[tier],
         FOCUS[focus],
+        SECURITY_BAR,
         guidelines_block(guidelines or {}),
         pr_block(pr),
     ]

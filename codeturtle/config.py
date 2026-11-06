@@ -15,8 +15,20 @@ DEFAULTS: dict = {
     # Tried in order; the next one is used only when the previous one hits its usage limit.
     "providers": ["codex", "grok", "claude"],
     "models": {"codex": "gpt-6-sol", "grok": "grok-4.7", "claude": "claude-opus-5-5"},
-    "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "medium"},
-    "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10},
+    "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "medium", "verify": "medium"},
+    "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10, "verify": 15},
+    # Security on every review (security.py, adapted from Cloudflare's security-audit skill).
+    "security": {
+        # "auto": a dedicated security pass on every review except docs- or assets-only changes;
+        # "always"; or "off" (the main review still applies the security bar).
+        "pass": "auto",
+        # A fresh call tries to refute each security finding before it is posted.
+        "verify": True,
+        # The repository's own threat model or security rules, read from the base branch.
+        "rules_files": [".github/codeturtle-security.md"],
+        # Domain checks (AI, web and auth, CI, cloud, data, mobile, ...) picked from the changed files.
+        "max_companions": 4,
+    },
     # When every provider is out and one says its usage limit resets within this many minutes,
     # wait for it instead of failing the review. 0 fails at once.
     "limit_wait_minutes": 30,

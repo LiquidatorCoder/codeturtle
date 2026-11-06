@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "candidates"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "1-2 sentences: the trust boundaries this change touches and the security verdict."
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposed_verdict", "severity", "attack_class", "path", "line", "title",
+          "principal", "boundary", "trace", "impact", "fix", "unresolved"
+        ],
+        "properties": {
+          "proposed_verdict": { "type": "string", "enum": ["confirmed", "needs_validation"] },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "none"],
+            "description": "From the demonstrated impact; none for needs_validation."
+          },
+          "attack_class": { "type": "string", "description": "e.g. injection, access control, ssrf, ci." },
+          "path": { "type": "string", "description": "Repository-relative file path." },
+          "line": {
+            "type": "integer",
+            "description": "New-file line number (the R number in the diff). 0 if not tied to a line."
+          },
+          "title": { "type": "string", "description": "One-line statement of the vulnerability." },
+          "principal": { "type": "string", "description": "The lower-trust actor and what they control." },
+          "boundary": { "type": "string", "description": "The control that fails and the boundary crossed." },
+          "trace": { "type": "string", "description": "Entry point -> propagation -> sink, as path:line steps." },
+          "impact": { "type": "string", "description": "The affected user or resource and the concrete result." },
+          "fix": { "type": "string", "description": "The invariant, the smallest source change and a regression test." },
+          "unresolved": { "type": "string", "description": "needs_validation: the exact missing fact. Otherwise empty." }
+        }
+      }
+    }
+  }
+}
