@@ -1,0 +1,49 @@
+name: release
+# Repositories use `LiquidatorCoder/codeturtle@v1`, so `v1` decides what all of them run. On every
+# push to main this tags `__version__` (codeturtle/__init__.py) when it has no tag yet, points `v1`
+# at the newest v1.y.z and publishes the GitHub release; a release then syncs every repository's
+# workflow file (fleet.yml). To release: bump `__version__` in the PR. A push without a bump does nothing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the tags, create the release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Only main's own code runs here (no pull_request trigger), so it may push tags from the Mac.
+    runs-on: [self-hosted, macOS, ARM64, mac-ci]
+    timeout-minutes: 15
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # every tag
+
+      # Moving `v1` ships to every repository at once, so the tests gate it.
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -t .
+
+      - name: Tag, move the major tag, publish
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: python3 -m codeturtle release
+
+  fleet:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    uses: ./.github/workflows/fleet.yml
+    secrets: inherit

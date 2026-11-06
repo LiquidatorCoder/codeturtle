@@ -1,0 +1,47 @@
+name: fleet
+# Keeps every repository that uses codeturtle on the latest release's workflow template. It finds
+# each repository with .github/workflows/codeturtle.yml (no list to maintain), updates an unmodified
+# older copy through a PR that it merges at once, and only reports pinned or customized copies. The
+# run fails when a repository needs you, so GitHub emails you. See README "Keeping every repo current".
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # daily; the Mac picks it up when it is next awake
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "sync: update and merge · pr: leave the PRs open · check: only report"
+        type: choice
+        options: [sync, pr, check]
+        default: sync
+  workflow_call: # from release.yml after a release
+    inputs:
+      mode:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    # Scheduled, dispatched or called by a release: only main's code runs here, never a PR's.
+    runs-on: [self-hosted, macOS, ARM64, mac-ci]
+    timeout-minutes: 20
+    concurrency:
+      group: codeturtle-fleet
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # the release tags and every earlier template
+          persist-credentials: false
+
+      - name: Sync every repository's workflow
+        env:
+          # A token of yours that can write contents, pull requests and workflows in the repositories.
+          # Unset, `gh` uses the runner's own login (the runners run in your login session).
+          GH_TOKEN: ${{ secrets.CODETURTLE_FLEET_TOKEN }}
+          # Default `sync`; set the repository variable CODETURTLE_FLEET_MODE to `pr` or `check` to change it.
+          MODE: ${{ inputs.mode || vars.CODETURTLE_FLEET_MODE || 'sync' }}
+        run: python3 -m codeturtle fleet --mode "$MODE"
