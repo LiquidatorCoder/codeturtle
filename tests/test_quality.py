@@ -3,12 +3,14 @@ blockers and majors, fix-rate stats, and incremental follow-up reviews."""
 
 import unittest
 
+from codeturtle import security, verify
 from codeturtle.config import DEFAULTS
 from codeturtle.events import Request
+from codeturtle.providers import Chain
 from codeturtle.review import Reviewer
 from codeturtle.tiers import TierDecision, floor_tier
 
-from tests.fakes import OK, FakeRun, api_file, change
+from tests.fakes import OK, FakeRun, api_file, change, finding
 
 
 class SizeRuleTests(unittest.TestCase):
@@ -64,6 +66,76 @@ class RiskSplitTests(unittest.TestCase):
 class MergeEffortTests(unittest.TestCase):
     def test_merge_runs_at_low_effort(self):
         self.assertEqual(DEFAULTS["effort"]["merge"], "low")
+
+
+class VerifyTests(unittest.TestCase):
+    def test_verdicts_drop_downgrade_and_never_raise(self):
+        bugs = verify.bug_items([finding("a", "major"), finding("b", "major"), finding("c", "blocker"),
+                                 finding("d", "major"), finding("e", "major"), finding("f", "major")])
+        verdicts = verify.by_id([
+            {"id": "b1", "verdict": "confirmed", "severity": "medium", "reason": "reachable from /search"},
+            {"id": "b2", "verdict": "confirmed", "severity": "low", "reason": "only on retry"},
+            {"id": "b3", "verdict": "rejected", "severity": "none", "reason": "guarded at a.py:4"},
+            {"id": "b4", "verdict": "confirmed", "severity": "high", "reason": "worse than claimed"},
+            {"id": "b5", "verdict": "needs_validation", "severity": "none", "unresolved": "is the cache shared?"},
+        ])
+        report = verify.Report(checked=len(bugs))
+        kept = verify.apply(bugs, verdicts, report)
+        self.assertEqual([(f["title"], f["severity"]) for f in kept],
+                         [("a", "major"), ("b", "minor"), ("d", "major"), ("f", "major")])
+        self.assertIn("**Verified:** reachable from /search", kept[0]["body"])
+        self.assertEqual((report.confirmed, report.downgraded, report.rejected, report.unchecked), (2, 1, 1, 1))
+        self.assertEqual(report.leads[0]["unresolved"], "is the cache shared?")
+
+    def test_prompt_has_only_the_methods_it_needs(self):
+        bugs = verify.bug_items([finding("a")])
+        text = verify.prompt(pr={"repo": "o/r", "number": 1, "title": "t", "body": "", "author": "a"},
+                             security_items=[], bugs=bugs, diff_text="d")
+        self.assertIn(verify.BUG_METHOD, text)
+        self.assertNotIn(security.VERIFY_METHOD, text)
+        self.assertIn('"claimed_severity": "medium"', text)
+
+    def test_chain_prefers_a_different_provider(self):
+        chain = Chain(["codex", "grok", "claude"], DEFAULTS["models"], log=lambda m: None)
+        self.assertEqual(chain.order(avoid={"codex"}), ["grok", "claude", "codex"])
+        chain.broken = {"grok": "logged out"}
+        self.assertEqual(chain.order(avoid={"codex"}), ["claude", "codex", "grok"])
+        chain.broken = {"grok": "x", "claude": "x"}
+        self.assertEqual(chain.order(avoid={"codex"})[0], "codex")  # the same provider beats a broken one
+
+    def answers(self, verdicts):
+        def answer(call, provider):
+            if call.schema == "security":
+                return {"summary": "s", "candidates": []}
+            if call.schema == "verify":
+                return {"verdicts": verdicts}
+            return {"summary": "Adds search.", "findings": [finding("Cursor leaks", "major"),
+                                                            finding("Typo in log", "minor", line=3)]}
+        return answer
+
+    def test_a_different_provider_drops_an_unconfirmed_major(self):
+        run = FakeRun(self)
+        rejected = [{"id": "b1", "verdict": "rejected", "severity": "none", "reason": "closed by the context manager",
+                     "unresolved": "", "fix": ""}]
+        code, payload, result = run.run([api_file("api/search.py", "q = 1\nr = 2")], self.answers(rejected),
+                                        request=Request("o/r", 1, "dispatch", "normal"))
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call("normal")["provider"], "codex")
+        self.assertEqual(run.call("verify")["provider"], "grok")
+        self.assertIn("**Verified by Grok (grok-4.7):** 1 blocker and major findings · 0 confirmed · 1 dropped",
+                      payload["body"])
+        self.assertEqual([f["title"] for f in result["findings"]], ["Typo in log"])  # the minor is not checked
+        self.assertEqual(result["verification"]["rejected"], 1)
+
+    def test_same_provider_when_no_other_can_run(self):
+        run = FakeRun(self)
+        confirmed = [{"id": "b1", "verdict": "confirmed", "severity": "medium", "reason": "r", "unresolved": "",
+                      "fix": ""}]
+        code, payload, result = run.run([api_file("api/search.py", "q = 1\nr = 2")], self.answers(confirmed),
+                                        request=Request("o/r", 1, "dispatch", "normal"), providers_ok=("codex",))
+        self.assertEqual(run.call("verify")["provider"], "codex")
+        self.assertIn("the same provider as the review", payload["body"])
+        self.assertTrue(result["verification"]["same_provider"])
 
 
 if __name__ == "__main__":

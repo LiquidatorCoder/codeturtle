@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import github, health, limits, post, prompts, security
+from . import github, health, limits, post, prompts, security, verify
 from . import max_tier, state_dir
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
@@ -123,6 +123,7 @@ class Reviewer:
         self.health: dict[str, health.Health] = {}
         self.health_notes: list[str] = []  # broken providers, with the fix; shown on the PR
         self.sec = security.Report()  # what this review's security check did
+        self.ver = verify.Report()  # what verification did to the blockers and majors
         self.companions: list[security.Companion] = []
         self.security_notes: dict[str, str] = {}  # the repo's own security rules (base branch)
         self.tmp: Path | None = None
@@ -264,10 +265,11 @@ class Reviewer:
     # ---- passes ------------------------------------------------------------------------------
 
     def call(self, kind: str, effort_key: str, prompt: str, cwd: Path, read_repo: bool = False,
-             schema: str = "review", wait: bool = True) -> dict:
-        """One model call. `wait=False` for a step with its own fallback (merge, verify): it never
-        waits for a usage limit to reset."""
-        data = self.chain.run(Call(
+             schema: str = "review", wait: bool = True, avoid=(), full_result: bool = False):
+        """One model call; returns its JSON (or the whole Result with `full_result`). `wait=False`
+        for a step with its own fallback (merge, verify): it never waits for a usage limit to reset.
+        `avoid`: providers to use only when no other can run."""
+        result = self.chain.run(Call(
             kind=kind,
             prompt=prompt,
             schema=schema,
@@ -275,9 +277,9 @@ class Reviewer:
             effort=self.cfg["effort"][effort_key],
             timeout_s=self.cfg["timeout_minutes"][effort_key] * 60,
             read_repo=read_repo,
-        ), wait=wait).data
+        ), wait=wait, avoid=avoid)
         self.progress.done(kind)
-        return data
+        return result if full_result else result.data
 
     def run_jobs(self, jobs: list[tuple[str, callable, bool]]) -> dict:
         """Run (key, call, optional) jobs, up to `full_parallel` at once. A required job's failure
@@ -462,47 +464,77 @@ class Reviewer:
         return diff_text, notes
 
     def check_security(self, findings: list, pass_result, pass_kind: str, tier: str, snapshot: Path | None) -> list:
-        """Verify every security candidate (the dedicated pass's, plus security findings from the
-        other passes) and return the findings to post: the non-security ones plus the confirmed."""
-        rep = self.sec
+        """Independent verification before anything is posted: every security candidate (the
+        dedicated pass's, plus security findings from the other passes) and every blocker and major,
+        in one call on a different provider where one is available. Returns the findings to post."""
+        rep, ver = self.sec, self.ver
         if isinstance(pass_result, Exception):
             rep.notes.append(f"The dedicated security pass failed ({pass_result}), so only the main review "
                              "checked security.")
             self.progress.fail(pass_kind)
             pass_result = None
-        others = [f for f in findings if not security.is_security(f)]
+        findings = [f for f in findings if isinstance(f, dict)]
+        severities = {str(s).lower() for s in self.cfg["verify"].get("severities") or []}
+        plain = [f for f in findings if not security.is_security(f)]
+        bugs = verify.bug_items([f for f in plain if str(f.get("severity", "")).lower() in severities])
+        others = [f for f in plain if str(f.get("severity", "")).lower() not in severities]
         raw = list((pass_result or {}).get("candidates") or [])
         raw += security.from_findings([f for f in findings if security.is_security(f)])
         candidates = security.normalize(raw)
-        rep.candidates = len(candidates)
-        if not candidates:
-            self.progress.skip("verify")
-            return others
-        if not self.cfg["security"].get("verify", True):
+        rep.candidates, ver.checked = len(candidates), len(bugs)
+        check_security = bool(candidates) and self.cfg["security"].get("verify", True)
+        confirmed = []
+        if candidates and not check_security:
             confirmed, rep.leads = security.unverified(candidates)
             rep.verified = False
+        kept = [{k: b[k] for k in ("severity", "category", "path", "line", "title", "body")} for b in bugs]
+        if not (bugs or check_security):
             self.progress.skip("verify")
         else:
             try:
                 snapshot = snapshot or self.ensure_snapshot()
-                cited = {c["path"] for c in candidates}
+                cited = {c["path"] for c in candidates} | {b["path"] for b in bugs}
                 diff_text, _ = render_diff([f for f in self.files if f.path in cited] or self.files,
                                            self.cfg["context_budget_chars"])
-                prompt = security.verify_prompt(pr=self.pr, candidates=candidates, diff_text=diff_text,
-                                                notes=self.security_notes)
-                data = self.call("verify", "verify", prompt, snapshot, read_repo=True, schema="verify", wait=False)
-                confirmed, rep.leads, rep.rejected = security.apply_verdicts(candidates, data["verdicts"])
-                rep.verified = True
+                prompt = verify.prompt(pr=self.pr, security_items=candidates if check_security else [], bugs=bugs,
+                                       diff_text=diff_text, notes=self.security_notes)
+                # The agent that checks a finding should not be the one that found it.
+                avoid = set(self.chain.used) if self.cfg["verify"].get("different_provider", True) else set()
+                result = self.call("verify", "verify", prompt, snapshot, read_repo=True, schema="verify",
+                                   wait=False, avoid=avoid, full_result=True)
+                verdicts = verify.by_id(result.data["verdicts"])
+                ver.provider = f"{label(result.provider)} ({result.model})"
+                ver.same_provider = result.provider in avoid
+                if check_security:
+                    confirmed, rep.leads, rep.rejected = security.apply_verdicts(candidates, result.data["verdicts"])
+                    rep.verified = True
+                kept = verify.apply(bugs, verdicts, ver)
             except (ProviderError, AllLimited, github.GitHubError) as e:
-                log(f"[verify] failed ({e}); posting the security candidates unverified")
-                confirmed, rep.leads = security.unverified(candidates)
-                rep.verified = False
-                rep.notes.append(f"The security findings were not independently verified ({e}).")
+                log(f"[verify] failed ({e}); posting the findings unverified")
+                if check_security:
+                    confirmed, rep.leads = security.unverified(candidates)
+                    rep.verified = False
+                    rep.notes.append(f"The security findings were not independently verified ({e}).")
+                if bugs:
+                    ver.unchecked = len(bugs)
+                    ver.notes.append(f"The blocker and major findings were not independently verified ({e}).")
                 self.progress.fail("verify")
         if tier == "fast":  # a fast review posts only blockers and majors
             confirmed = [f for f in confirmed if f["severity"] in ("blocker", "major")]
         rep.confirmed = len(confirmed)
-        return others + confirmed
+        return others + kept + confirmed
+
+    def verification_result(self) -> dict:
+        v = self.ver
+        return {
+            "checked": v.checked, "confirmed": v.confirmed, "downgraded": v.downgraded, "rejected": v.rejected,
+            "unchecked": v.unchecked, "provider": v.provider, "same_provider": v.same_provider,
+            "needs_validation": [{
+                "id": finding_id({**lead, "severity": "needs_validation"}),
+                "path": lead["path"], "line": lead["line"], "category": lead["attack_class"],
+                "title": post.redact(lead["title"]), "unresolved": post.redact(lead["unresolved"]),
+            } for lead in v.leads],
+        }
 
     def security_result(self) -> dict:
         rep = self.sec
@@ -539,17 +571,18 @@ class Reviewer:
     def publish(self, decision: TierDecision, outcome: Outcome) -> None:
         findings = post.normalize(outcome.findings, decision.tier)
         inline, rest = post.split_inline(findings, self.files, self.cfg["max_inline_comments"])
-        notes = self.health_notes + self.sec.notes + outcome.notes
+        notes = self.health_notes + self.sec.notes + self.ver.notes + outcome.notes
         body_args = dict(
             tier=decision.tier, tier_reason=decision.reason, reviewers=self.reviewers(),
             summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=notes,
-            security=self.sec,
+            security=self.sec, verification=self.ver,
         )
         payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
         self.result.summary = outcome.summary
         self.result.notes = list(notes)
         self.result.findings = with_ids(findings, inline)
         self.result.security = self.security_result()
+        self.result.verification = self.verification_result()
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
         if self.dry_run:

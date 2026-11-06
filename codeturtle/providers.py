@@ -375,34 +375,34 @@ class Chain:
 
     # ---- running a call ----------------------------------------------------------------------
 
-    def run(self, call: Call, wait: bool = True) -> Result:
+    def run(self, call: Call, wait: bool = True, avoid=()) -> Result:
         """Run `call` on the best available provider. `wait=False` never waits for a reset (for a
-        step that has its own fallback)."""
+        step that has its own fallback). Providers in `avoid` go after the other healthy ones, for
+        an independent check by a different model; they are still used when no other can run."""
         rounds = 0
         while True:
-            for name in self.order():
+            for name in self.order(avoid):
                 result = self._attempt(name, call)
                 if result is not None:
                     return result
             rounds += 1
-            if self.order() and rounds < 3:
+            if self.order(avoid) and rounds < 3:
                 continue  # a short limit ("retry after 5s") reset meanwhile
             if not (wait and self._wait_for_reset()):
                 raise self._out_of_providers()
             rounds = 0
 
-    def order(self) -> list[str]:
-        """Providers still worth trying, best first: healthy ones in the configured order, then
-        ones an earlier review saw at their limit, then ones the health check flagged."""
+    def order(self, avoid=()) -> list[str]:
+        """Providers still worth trying, best first: healthy ones in the configured order (those in
+        `avoid` last among them), then ones an earlier review saw at their limit, then ones the
+        health check flagged."""
         now = self.clock()
 
-        def rank(name: str) -> int:
-            if name in self.broken:
-                return 2
-            return 1 if self.remembered.get(name, 0) > now else 0
+        def rank(name: str) -> tuple:
+            health = 2 if name in self.broken else 1 if self.remembered.get(name, 0) > now else 0
+            return health, name in avoid, self.providers.index(name)
 
-        live = [n for n in self.providers if not self._skipped(n)]
-        return sorted(live, key=lambda n: (rank(n), self.providers.index(n)))
+        return sorted((n for n in self.providers if not self._skipped(n)), key=rank)
 
     def _skipped(self, name: str) -> bool:
         if name in self.down:

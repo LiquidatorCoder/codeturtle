@@ -103,7 +103,10 @@ def build_body(
     head_sha: str,
     notes: list[str],
     security=None,  # security.Report: the security check's summary line and leads
+    verification=None,  # verify.Report: what verification did to the blockers and majors
 ) -> str:
+    extra = [line for line in (security.summary_line() if security else None,
+                               verification.summary_line() if verification else None) if line]
     lines = [
         f"### 🐢 codeturtle · {tier.capitalize()} review",
         "",
@@ -111,11 +114,11 @@ def build_body(
         "",
         f"**Tier:** {tier.capitalize()} — {tier_reason}  ",
         f"**Reviewed by:** {reviewers}  ",
-        f"**Findings:** {counts(findings)}" + (f" ({len(inline)} inline)" if findings else "")
-        + ("  " if security else ""),
+        f"**Findings:** {counts(findings)}" + (f" ({len(inline)} inline)" if findings else ""),
     ]
-    if security:
-        lines.append(security.summary_line())
+    for line in extra:
+        lines[-1] += "  "  # a Markdown line break before the next status line
+        lines.append(line)
     if not findings:
         lines += ["", "No issues found at this depth."]
     if rest:
@@ -126,10 +129,10 @@ def build_body(
             if f["body"]:
                 lines.append("  " + f["body"].replace("\n", "\n  "))
         lines += ["", "</details>"]
-    leads = list(getattr(security, "leads", None) or [])
+    leads = list(getattr(security, "leads", None) or []) + list(getattr(verification, "leads", None) or [])
     if leads:
-        lines += ["", f"<details><summary>Security leads that need validation ({len(leads)}): "
-                      "not findings, no severity, each hangs on one fact outside the code</summary>", ""]
+        lines += ["", f"<details><summary>Need validation ({len(leads)}): not findings and no severity; "
+                      "each hangs on one fact outside the code</summary>", ""]
         for lead in leads:
             where = f"`{lead['path']}:{lead['line']}`" if lead["line"] else f"`{lead['path'] or 'general'}`"
             lines.append(f"- 🔍 **{lead['title']}** — {where} · {lead['attack_class']}  ")

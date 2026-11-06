@@ -130,7 +130,7 @@ class ReportTests(unittest.TestCase):
         body = post.build_body(tier="fast", tier_reason="r", reviewers="Codex", summary="s", findings=[], inline=[],
                                rest=[], head_sha="a" * 40, notes=[], security=rep)
         self.assertIn(rep.summary_line(), body)
-        self.assertIn("Security leads that need validation (1)", body)
+        self.assertIn("Need validation (1)", body)
         self.assertIn("Check: is the fork-PR approval required?", body)
         quiet = security.Report(skipped="only docs or assets changed")
         self.assertEqual(quiet.summary_line(),
@@ -180,7 +180,7 @@ class ReviewFlowTests(unittest.TestCase):
                                  download_snapshot=mock.DEFAULT)
         found = {n: health.Health(n, "ok") for n in ("codex", "grok", "claude")}
         with gh as m, mock.patch.object(health, "check_all", return_value=found), \
-                mock.patch.dict(providers.RUNNERS, {"codex": codex, "grok": never, "claude": never}, clear=True), \
+                mock.patch.dict(providers.RUNNERS, {"codex": codex, "grok": codex, "claude": codex}, clear=True), \
                 mock.patch.object(review_mod, "log", lambda msg: None):
             os.environ.pop("GITHUB_STEP_SUMMARY", None)
             m["get_pr"].return_value = self.PR

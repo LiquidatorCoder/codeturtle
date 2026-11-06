@@ -18,6 +18,13 @@ DEFAULTS: dict = {
     # The merge step only de-duplicates, so it runs at low effort.
     "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "low", "verify": "medium"},
     "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10, "verify": 15},
+    # Before posting, an independent call re-reads the code for these findings and drops or
+    # downgrades any it can't confirm (verify.py). Empty list: post everything as written.
+    "verify": {
+        "severities": ["blocker", "major"],
+        # Prefer a provider other than the one that wrote the findings.
+        "different_provider": True,
+    },
     # Security on every review (security.py, adapted from Cloudflare's security-audit skill).
     "security": {
         # "auto": a dedicated security pass on every review except docs- or assets-only changes;

@@ -32,7 +32,7 @@ def step_label(kind: str, parts: int = 0) -> str:
         "full:security": "Security pass",
         "full:tests": "Tests pass",
         "security": "Security pass",
-        "verify": "Verify security findings",
+        "verify": "Verify findings",
         "merge": "Merge findings",
         "post": "Post review",
     }.get(kind, kind)
