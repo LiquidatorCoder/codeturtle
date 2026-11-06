@@ -163,7 +163,8 @@ class Progress:
         if not self.comment_id:
             return
         try:
-            github.edit_comment(self.repo, self.comment_id, self.render())
+            # No retries: a missed edit is cosmetic and the next one catches up.
+            github.edit_comment(self.repo, self.comment_id, self.render(), retry=False)
         except github.GitHubError as e:
             self.log(f"Progress update failed: {e}")
 

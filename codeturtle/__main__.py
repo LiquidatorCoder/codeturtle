@@ -3,6 +3,7 @@
     python3 -m codeturtle action                                 # inside GitHub Actions
     python3 -m codeturtle review --repo owner/name --pr 12 \\
         [--tier fast|normal|full] [--providers codex,grok,claude] [--dry-run]
+    python3 -m codeturtle doctor [--providers codex,grok,claude] # is every model CLI ready?
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ import signal
 import sys
 
 from . import TIERS
+from .config import DEFAULTS
 from .events import BadRequest, Request, from_event
+from .health import doctor
 from .review import Reviewer, log
 
 
@@ -61,9 +64,13 @@ def main(argv: list[str]) -> int:
     review.add_argument("--min-tier", choices=TIERS, help="lowest tier allowed (raises the rule floor)")
     review.add_argument("--providers", help="comma-separated order, e.g. grok,claude")
     review.add_argument("--dry-run", action="store_true", help="write the review to out/ instead of posting")
+    check = sub.add_parser("doctor", help="check that every model CLI is installed and logged in (exit 1 if not)")
+    check.add_argument("--providers", help="comma-separated, default: codex,grok,claude")
     args = parser.parse_args(argv)
     if args.command == "action":
         return action()
+    if args.command == "doctor":
+        return doctor(providers_arg(args.providers) or DEFAULTS["providers"], DEFAULTS["models"])
     req = Request(args.repo, args.pr, "cli", args.tier, min_tier=args.min_tier)
     return Reviewer(req, providers_arg(args.providers), args.dry_run).run()
 

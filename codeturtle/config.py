@@ -17,6 +17,9 @@ DEFAULTS: dict = {
     "models": {"codex": "gpt-6-sol", "grok": "grok-4.7", "claude": "claude-opus-5-5"},
     "effort": {"triage": "low", "fast": "low", "normal": "medium", "full": "high", "merge": "medium"},
     "timeout_minutes": {"triage": 5, "fast": 10, "normal": 20, "full": 40, "merge": 10},
+    # When every provider is out and one says its usage limit resets within this many minutes,
+    # wait for it instead of failing the review. 0 fails at once.
+    "limit_wait_minutes": 30,
     "tiers": {
         # Any changed file matching these forces a full review.
         "full_paths": [

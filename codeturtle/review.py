@@ -12,14 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import github, post, prompts
-from . import max_tier
+from . import github, health, limits, post, prompts
+from . import max_tier, state_dir
 from .config import CONFIG_PATH, DEFAULTS, matches_any, merge
 from .diff import FileChange, chunk_files, render_diff
 from .events import Request
 from .progress import Progress
-from .providers import LABELS, AllLimited, Call, Chain, ProviderError, kill_all
-from .result import ResultWriter, with_ids
+from .providers import AllLimited, Call, Chain, ProviderError, Unavailable, kill_all, label
+from .result import ResultWriter, iso, with_ids
 from .tiers import TierDecision, combine, floor_tier, label_override, raise_floor
 
 AGENT_CONFIG_DIRS = {".claude", ".codex", ".grok", ".cursor", ".agents", ".gemini", ".windsurf"}
@@ -48,7 +48,7 @@ def group(title: str):
 @contextlib.contextmanager
 def review_slot(max_parallel: int, wait_minutes: int, on_wait=None):
     """At most `max_parallel` reviews at once on this Mac, across every repo's runners."""
-    root = Path("~/.codeturtle/slots").expanduser()
+    root = state_dir() / "slots"
     root.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + wait_minutes * 60
     announced = False
@@ -120,6 +120,8 @@ class Reviewer:
         self.chain: Chain | None = None
         self.progress = Progress(req.repo, req.number, enabled=not dry_run, log=log)
         self.result = ResultWriter(req)
+        self.health: dict[str, health.Health] = {}
+        self.health_notes: list[str] = []  # broken providers, with the fix; shown on the PR
 
     # ---- setup -------------------------------------------------------------------------------
 
@@ -146,11 +148,21 @@ class Reviewer:
             except json.JSONDecodeError as e:
                 raise ProviderError(f"{CONFIG_PATH} on the base branch is not valid JSON: {e}")
         providers = self.providers_override or self.cfg["providers"]
+        self.check_providers(providers)
         self.chain = Chain(
             providers, self.cfg["models"], log=log,
             on_attempt=self.progress.begin,
-            on_limit=lambda name: self.progress.note(f"{name} hit its usage limit, so the next reviewer took over."),
+            on_limit=self.on_limit,
+            on_down=lambda name, why: self.progress.note(f"{name} {why}, so the next reviewer took over."),
+            on_wait=lambda until: self.progress.note(
+                f"Every reviewer is out for now, so the review waits until {limits.fmt_time(until)} "
+                "for a usage limit to reset, then carries on."),
+            broken={n: h.detail for n, h in self.health.items() if h.broken},
+            remembered={n: t for n, t in limits.active().items() if n in providers},
+            wait_minutes=float(self.cfg["limit_wait_minutes"]),
+            persist=True,
         )
+        self.note_remembered_limits()
 
         self.head_sha = pr["head"]["sha"]
         self.pr = {
@@ -170,6 +182,32 @@ class Reviewer:
             if text and text.strip():
                 self.guidelines[path] = text[:20_000]
         return None
+
+    # ---- providers ---------------------------------------------------------------------------
+
+    def check_providers(self, providers: list[str]) -> None:
+        """Health-check every provider first, so a broken backup shows on this PR now instead of
+        failing a later review at the moment it is needed."""
+        with group("Checking providers"):
+            self.health = health.check_all(providers)
+            for name in providers:
+                h = self.health[name]
+                log(f"{label(name)}: {h.status}" + (f" ({h.detail})" if h.detail else ""))
+        self.health_notes = [self.health[n].warning() for n in providers if self.health[n].broken]
+        for note in self.health_notes:
+            self.progress.note(note)
+
+    def note_remembered_limits(self) -> None:
+        chain = self.chain
+        ready = [i for i, n in enumerate(chain.providers) if n not in chain.remembered and n not in chain.broken]
+        for i, name in enumerate(chain.providers):
+            if name in chain.remembered and ready and i < ready[0]:
+                self.progress.note(f"{label(name)} is at its usage limit until {limits.fmt_time(chain.remembered[name])} "
+                                   "(seen by an earlier review), so other reviewers go first.")
+
+    def on_limit(self, name: str, reset: float | None) -> None:
+        when = f" (it resets {limits.fmt_time(reset)})" if reset else ""
+        self.progress.note(f"{name} hit its usage limit{when}, so the next reviewer took over.")
 
     # ---- tier --------------------------------------------------------------------------------
 
@@ -208,7 +246,7 @@ class Reviewer:
             effort=self.cfg["effort"][effort_key],
             timeout_s=self.cfg["timeout_minutes"][effort_key] * 60,
             read_repo=read_repo,
-        )).data
+        ), wait=kind != "merge").data  # the merge has a model-free fallback: never wait for it
         self.progress.done(kind)
         return data
 
@@ -296,21 +334,28 @@ class Reviewer:
     # ---- output ------------------------------------------------------------------------------
 
     def reviewers(self) -> str:
-        used = ", ".join(f"{LABELS[p]} ({self.chain.models[p]})" for p in self.chain.used) or "none"
-        if self.chain.limit_notes:
-            used += f" · usage limit hit: {', '.join(self.chain.limit_notes)}"
+        chain = self.chain
+        used = ", ".join(f"{label(p)} ({chain.models[p]})" for p in chain.used) or "none"
+        limited = [label(n) + (f" (until {limits.fmt_time(r)})" if r else "") for n, r in chain.at_limit()]
+        if limited:
+            used += f" · usage limit: {', '.join(limited)}"
+        why = {"setup": "could not authenticate", "missing": "not installed", "transient": "temporary errors"}
+        down = [f"{label(n)} ({why[chain.down[n][0]]})" for n in chain.providers if n in chain.down]
+        if down:
+            used += f" · unavailable: {', '.join(down)}"
         return used
 
     def publish(self, decision: TierDecision, outcome: Outcome) -> None:
         findings = post.normalize(outcome.findings, decision.tier)
         inline, rest = post.split_inline(findings, self.files, self.cfg["max_inline_comments"])
+        notes = self.health_notes + outcome.notes
         body_args = dict(
             tier=decision.tier, tier_reason=decision.reason, reviewers=self.reviewers(),
-            summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=outcome.notes,
+            summary=outcome.summary, findings=findings, head_sha=self.head_sha, notes=notes,
         )
         payload = post.build_payload(head_sha=self.head_sha, body=post.build_body(inline=inline, rest=rest, **body_args), inline=inline)
         self.result.summary = outcome.summary
-        self.result.notes = list(outcome.notes)
+        self.result.notes = list(notes)
         self.result.findings = with_ids(findings, inline)
         write_step_summary(payload["body"])
         self.progress.begin("post", "GitHub")
@@ -332,7 +377,9 @@ class Reviewer:
         log(f"Posted review: {len(inline)} inline comments, {len(rest)} in the body")
 
     def fail(self, message: str) -> None:
-        body = f"### 🐢 codeturtle could not review this PR\n\n{post.redact(message)}\n\n<sub>Re-run with `/review` once fixed.</sub>"
+        notes = "".join(f"\n\n> {n}" for n in self.health_notes)
+        body = (f"### 🐢 codeturtle could not review this PR\n\n{post.redact(message + notes)}"
+                "\n\n<sub>Re-run with `/review` once fixed.</sub>")
         write_step_summary(body)
         if not self.dry_run:
             with contextlib.suppress(github.GitHubError):
@@ -342,11 +389,16 @@ class Reviewer:
 
     def record_reviewers(self) -> None:
         if self.chain:
+            limited = self.chain.at_limit()
             self.result.reviewers = {
                 "providers_used": list(self.chain.used),
                 "models": {p: self.chain.models[p] for p in self.chain.used},
-                "usage_limited": list(self.chain.limit_notes),
+                "usage_limited": [label(n) for n, _ in limited],
                 "calls": self.chain.calls,
+                # 1.2: why a provider was not used, and what the health check found.
+                "limits": {n: iso(r) for n, r in limited},
+                "unavailable": {n: self.chain.down[n][0] for n in self.chain.providers if n in self.chain.down},
+                "health": {n: {"status": h.status, "detail": post.redact(h.detail)[:200]} for n, h in self.health.items()},
             }
 
     def run(self) -> int:
@@ -387,10 +439,17 @@ class Reviewer:
             return 0
         except AllLimited as e:
             self.progress.close()
-            self.fail(f"Every reviewer is at its usage limit ({', '.join(self.chain.limit_notes)}). "
-                      "Comment `/review` to try again once a limit resets.")
+            when = f"after {limits.fmt_time(e.retry_at)}" if e.retry_at else "once a limit resets"
+            self.fail(f"No reviewer could run: {'; '.join(e.parts)}. Comment `/review` to try again {when}.")
+            self.result.retry_at = iso(e.retry_at)
             log(str(e))
             status, error = "usage_limited", str(e)
+            return 1
+        except Unavailable as e:
+            self.progress.close()
+            self.fail(f"No reviewer could run: {'; '.join(e.parts)}. Comment `/review` to try again once that is fixed.")
+            log(str(e))
+            status, error = "failed", str(e)
             return 1
         except (ProviderError, github.GitHubError) as e:
             self.progress.close()
