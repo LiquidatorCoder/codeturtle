@@ -30,6 +30,14 @@ AGENT_CONFIG_FILES = {
 SKIP_LABEL = "codeturtle:skip"
 
 
+def author_allowed(login: str, authors) -> bool:
+    """True when `authors` (the config list; a bare string counts as one login) is empty or names `login`."""
+    if isinstance(authors, str):
+        authors = [authors]
+    wanted = {str(a).strip().lower() for a in authors or [] if str(a).strip()}
+    return not wanted or login.strip().lower() in wanted
+
+
 def log(msg: str) -> None:
     print(msg, flush=True)
 
@@ -155,6 +163,9 @@ class Reviewer:
                 self.cfg = merge(DEFAULTS, json.loads(raw_cfg))
             except json.JSONDecodeError as e:
                 raise ProviderError(f"{CONFIG_PATH} on the base branch is not valid JSON: {e}")
+        author = (pr.get("user") or {}).get("login") or ""
+        if req.trigger == "pull_request" and not author_allowed(author, self.cfg.get("authors")):
+            return f"PR author {author or 'unknown'} is not in the config's authors list (comment /review to review it anyway)"
         providers = self.providers_override or self.cfg["providers"]
         self.check_providers(providers)
         self.chain = Chain(

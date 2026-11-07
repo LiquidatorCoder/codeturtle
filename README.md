@@ -65,6 +65,9 @@ It runs when a PR is opened, reopened or marked ready (not on every push, to sav
 again, comment `/review` or `/review full`: that reviews only the commits since the last review (a
 follow-up). `/review fresh` (or `/review fresh full`) reviews the whole PR again. Only owners, members and collaborators can trigger it.
 Add the `codeturtle:skip` label to skip the automatic run.
+To review only some people's PRs automatically, list their GitHub logins in `authors` in
+`.github/codeturtle.json` (for example `{"authors": ["LiquidatorCoder"]}`); anyone else's PR is
+skipped unless someone comments `/review` on it.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
@@ -259,6 +262,7 @@ default list (they are not appended).
 
 | Key | Default |
 |---|---|
+| `authors` | `[]` (everyone; otherwise only these GitHub logins' PRs get the automatic review — `/review` and dispatched runs still review any PR) |
 | `providers` | `["codex", "grok", "claude"]` |
 | `models` | `codex: gpt-6-sol`, `grok: grok-4.7`, `claude: claude-opus-5-5` |
 | `effort` | triage `low`, fast `low`, normal `medium`, full `high`, merge `low`, verify `medium` |
