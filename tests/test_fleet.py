@@ -308,16 +308,18 @@ class ProcessTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def run_main(self, outcomes_repos, mode="sync", template=None):
+    def run_main(self, outcomes_repos, mode="sync", template=None, env=None):
         summary = tempfile.NamedTemporaryFile("r", suffix=".md", delete=False)
         self.addCleanup(os.unlink, summary.name)
         with mock.patch.object(fleet, "load_template", lambda: template or tpl()), \
                 mock.patch.object(fleet, "identity", lambda: "me (gh login)"), \
                 mock.patch.object(fleet, "discover", lambda owners, repos: outcomes_repos), \
                 mock.patch.object(fleet, "version_at", lambda ref: "1.4.0"), \
-                mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary.name}), \
-                mock.patch("builtins.print"):
+                mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary.name, "GITHUB_ACTIONS": "",
+                                             **(env or {})}), \
+                mock.patch("builtins.print") as out:
             code = fleet.main(mode)
+        self.printed = str(out.call_args_list)
         return code, Path(summary.name).read_text()
 
     def test_everything_in_sync_exits_zero(self):
@@ -334,6 +336,20 @@ class MainTests(unittest.TestCase):
         self.assertIn("not the latest release v1.4.0", text)
         self.assertIn("mode `check`", text)
         self.assertIn("| ⚠️ o/app | outdated | 1.4.0 (@v1) | would update |", text)
+
+    def test_private_names_stay_out_of_the_public_log(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, home)
+        secret = fleet.Repo("o/secret-app", "main", HEAD, "t" * 40, "x", PINNED, True, True, ["merge"])
+        shown = fleet.Repo("o/open-app", "main", HEAD, "t" * 40, "new-blob", TEMPLATE, False, True, ["merge"])
+        code, text = self.run_main([secret, shown], env={"GITHUB_ACTIONS": "true", "CODETURTLE_HOME": home})
+        self.assertEqual(code, 1)
+        for public in (text, self.printed):
+            self.assertNotIn("secret-app", public)
+            self.assertIn(fleet.label("o/secret-app"), public)
+            self.assertIn("o/open-app", public)  # a public repository's name is no secret
+        full = (Path(home) / fleet.REPORT_FILE).read_text()
+        self.assertIn("| ⚠️ o/secret-app | pinned |", full)
 
     def test_unsafe_template_is_never_rolled_out(self):
         bad = fleet.Template("v1.4.0", C, PINNED, "v1", C, {})
