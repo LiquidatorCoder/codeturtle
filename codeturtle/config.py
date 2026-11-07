@@ -12,6 +12,9 @@ import re
 CONFIG_PATH = ".github/codeturtle.json"
 
 DEFAULTS: dict = {
+    # GitHub logins whose PRs get the automatic review (case-insensitive). Empty: everyone's.
+    # A `/review` comment or a workflow_dispatch run still reviews any PR.
+    "authors": [],
     # Tried in order; the next one is used only when the previous one hits its usage limit.
     "providers": ["codex", "grok", "claude"],
     "models": {"codex": "gpt-6-sol", "grok": "grok-4.7", "claude": "claude-opus-5-5"},

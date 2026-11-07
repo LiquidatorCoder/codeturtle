@@ -388,7 +388,7 @@ class ReviewerTests(TempHome):
     FILES = [{"filename": "a.py", "status": "modified", "additions": 1, "deletions": 0,
               "patch": "@@ -1,1 +1,2 @@\n x = 1\n+y = 2"}]
 
-    def review(self, runners, found):
+    def review(self, runners, found, req=None, config=None):
         result_path = self.home / "result.json"
         gh = mock.patch.multiple(github, get_pr=mock.DEFAULT, file_at_ref=mock.DEFAULT, get_files=mock.DEFAULT,
                                  post_comment=mock.DEFAULT, edit_comment=mock.DEFAULT, delete_comment=mock.DEFAULT,
@@ -400,14 +400,33 @@ class ReviewerTests(TempHome):
                 mock.patch.object(review_mod, "log", lambda msg: None):
             os.environ.pop("GITHUB_STEP_SUMMARY", None)
             m["get_pr"].return_value = self.PR
-            m["file_at_ref"].return_value = None
+            m["file_at_ref"].side_effect = lambda repo, path, ref: (
+                json.dumps(config) if config is not None and path == review_mod.CONFIG_PATH else None)
             m["get_files"].return_value = self.FILES
             m["post_comment"].return_value = 11
             m["list_comments"].return_value = []
             m["list_reviews"].return_value = []
             m["post_review"].return_value = {"id": 5, "html_url": "https://example.test/review/5"}
-            code = Reviewer(Request("o/r", 1, "dispatch")).run()
+            code = Reviewer(req or Request("o/r", 1, "dispatch")).run()
         return code, m, json.loads(result_path.read_text())
+
+    def test_authors_limits_only_the_automatic_review(self):
+        def codex(call, model):
+            answers = {"triage": {"tier": "fast", "reason": "small"}, "security": {"summary": "s", "candidates": []}}
+            return answers.get(call.schema, OK)
+
+        found = {name: health.Health(name, "ok") for name in ("codex", "grok", "claude")}
+        runners = {"codex": codex, "grok": codex, "claude": codex}
+        auto = Request("o/r", 1, "pull_request")
+        code, m, result = self.review(runners, found, auto, {"authors": ["someone-else"]})
+        self.assertEqual((code, result["status"]), (0, "skipped"))
+        self.assertIn("authors list", result["skip_reason"])
+        m["post_review"].assert_not_called()
+        # Listed (any case), no list, or an explicit /review: reviewed.
+        for req, cfg in ((auto, {"authors": ["DEV"]}), (auto, None),
+                         (Request("o/r", 1, "comment"), {"authors": ["someone-else"]})):
+            code, m, result = self.review(runners, found, req, cfg)
+            self.assertEqual((code, result["status"]), (0, "completed"), (req.trigger, cfg))
 
     def test_broken_backup_is_named_on_the_review(self):
         def codex(call, model):
