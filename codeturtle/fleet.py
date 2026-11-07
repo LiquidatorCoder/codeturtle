@@ -32,7 +32,7 @@ import urllib.parse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import github, release
+from . import github, release, state_dir
 from .github import GitHubError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -430,11 +430,12 @@ class Outcome:
     action: str = ""
     attention: bool = False
     notes: list[str] = field(default_factory=list)
+    private: bool = True
 
 
 def process(repo: Repo, tpl: Template, mode: str) -> Outcome:
     state = classify(repo, tpl)
-    out = Outcome(repo.slug, state, runs(repo.text))
+    out = Outcome(repo.slug, state, runs(repo.text), private=repo.private)
     if not repo.private:
         out.attention = True
         out.notes.append("public repository: codeturtle must only run on private ones")
@@ -481,6 +482,23 @@ def report(tpl: Template, outcomes: list[Outcome], who: str, mode: str) -> str:
     return "\n".join(head + rows)
 
 
+REPORT_FILE = "fleet-report.md"
+
+
+def label(slug: str) -> str:
+    """A stable stand-in for a private repository's name: the same repository gets the same label
+    on every run, and the full report on the runner maps it back."""
+    return "private repo " + hashlib.sha256(slug.encode()).hexdigest()[:6]
+
+
+def hide_private(text: str, outcomes: list[Outcome]) -> str:
+    """codeturtle's own repository is public, so its Actions logs and job summaries are too: replace
+    every private repository's name (also inside gh error messages) with its label."""
+    for o in sorted((o for o in outcomes if o.private), key=lambda o: -len(o.repo)):
+        text = text.replace(o.repo, label(o.repo))
+    return text
+
+
 TOKEN_HELP = ("Set the CODETURTLE_FLEET_TOKEN secret to a token of yours that can write to the repositories "
               "(contents, pull requests, workflows), or run where `gh` is logged in as you.")
 
@@ -518,6 +536,19 @@ def main(mode: str = "sync", owners: list[str] | None = None, repos: list[str] |
         print(f"fleet: {e}")
         return 1
     text = report(tpl, outcomes, who, mode)
+    if os.environ.get("GITHUB_ACTIONS") == "true" and any(o.private for o in outcomes):
+        # Keep the names on the runner (always your Mac), never in the public log.
+        full = state_dir() / REPORT_FILE
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(text + "\n")
+        text = hide_private(text, outcomes) + (
+            f"\n\nPrivate repositories are shown by label because this log is public; the runner that"
+            f" ran this job has the full report in `~/.codeturtle/{REPORT_FILE}`, or run"
+            f" `python3 -m codeturtle fleet --mode check` where `gh` is logged in as you.")
+        everyone = outcomes
+        outcomes = [Outcome(**{**asdict(o), "repo": label(o.repo) if o.private else o.repo,
+                               "action": hide_private(o.action, everyone),
+                               "notes": [hide_private(n, everyone) for n in o.notes]}) for o in everyone]
     if as_json:
         print(json.dumps({"release": tpl.tag, "major": tpl.major, "major_commit": tpl.major_commit,
                           "release_commit": tpl.commit, "mode": mode,

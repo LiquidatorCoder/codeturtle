@@ -99,7 +99,9 @@ Nothing here is done by hand: releasing is merging a version bump, and every rep
   you (pinned, customized, public, no write access, an update or merge GitHub refused) or when `v1`
   is behind the latest release (then nothing is written), so GitHub emails you. A template that fails
   the protocol check (`# codeturtle-protocol: 2`, one `@v1` action, the harness's dispatch inputs) is
-  never rolled out.
+  never rolled out. This repository is public, so its Actions logs and job summaries are too: there a
+  private repository is shown as `private repo <hash>` (the same label every run), and the runner that
+  ran the job keeps the full report in `~/.codeturtle/fleet-report.md`.
 - **Its token.** The sync writes to other repositories, which a workflow's own `GITHUB_TOKEN` can't,
   so it needs the `CODETURTLE_FLEET_TOKEN` secret: a fine-grained token for all your repositories with
   Contents, Pull requests and Workflows read/write (or a classic one with `repo` and `workflow`, which
