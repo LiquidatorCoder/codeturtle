@@ -55,7 +55,7 @@ def group(title: str):
 
 @contextlib.contextmanager
 def review_slot(max_parallel: int, wait_minutes: int, on_wait=None):
-    """At most `max_parallel` reviews at once on this Mac, across every repo's runners."""
+    """At most `max_parallel` reviews at once on this host, across every repo's runners."""
     root = state_dir() / "slots"
     root.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + wait_minutes * 60
@@ -78,7 +78,7 @@ def review_slot(max_parallel: int, wait_minutes: int, on_wait=None):
         if time.time() > deadline:
             raise ProviderError(f"waited {wait_minutes} min for a free review slot")
         if not announced:
-            log("Waiting for another codeturtle review on this Mac to finish...")
+            log("Waiting for another codeturtle review on this host to finish...")
             if on_wait:
                 on_wait()
             announced = True
@@ -755,7 +755,7 @@ class Reviewer:
                 return 0
             self.progress.start()
             max_parallel = int(os.environ.get("CODETURTLE_MAX_PARALLEL", "1"))
-            on_wait = lambda: self.progress.note("Waiting for another codeturtle review on this Mac to finish.")
+            on_wait = lambda: self.progress.note("Waiting for another codeturtle review on this host to finish.")
             with review_slot(max_parallel, 90, on_wait), tempfile.TemporaryDirectory(prefix="codeturtle-") as tmp:
                 self.tmp = Path(tmp)
                 self.work = self.tmp / "empty"

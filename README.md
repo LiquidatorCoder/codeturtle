@@ -288,7 +288,7 @@ default list (they are not appended).
 | `full_parallel` | 3 (full-tier passes at once; 1 = one after another) |
 
 Environment on the runner: `CODETURTLE_MAX_PARALLEL` (default 1: one review at a time across all
-repos on this Mac), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific CLI,
+repos on this host), `CODETURTLE_{CODEX,GROK,CLAUDE}_BIN` to point at a specific CLI,
 `CODETURTLE_HOME` (default `~/.codeturtle`: review slots, `limits.json`, the Claude token file).
 
 ## Run it locally
@@ -336,3 +336,19 @@ A self-hosted runner executes on your Mac with your AI logins, so:
 The runners are LaunchAgents in your login session, so Claude normally uses its keychain login. If
 that fails under the runner, run `claude setup-token` and save the token to
 `~/.codeturtle/claude-oauth-token` (mode 600). codeturtle passes it as `CLAUDE_CODE_OAUTH_TOKEN`.
+
+## Linux runner hosts
+
+The workflow runs on `[self-hosted, ci-pool]`, so CI Turtle may route a review to a remote
+Linux x64 host (for example WSL2 Ubuntu) as well as the Mac. Nothing in codeturtle is macOS-specific;
+a Linux host needs, for the runner user:
+
+- `python3` 3.10+, `gh` 2.48+ and `bubblewrap` (Codex's `--sandbox read-only` uses it on Linux).
+- `codex`, `claude` and `grok` in `~/.local/bin`, `~/.grok/bin` or `/usr/local/bin`: runner jobs
+  start in a non-login shell, so rc files and nvm are not loaded.
+- The same subscription logins: `codex login`, `grok login`, and `claude setup-token` saved to
+  `~/.codeturtle/claude-oauth-token` (mode 600). There is no keychain on Linux.
+
+Each host has its own review slots and `limits.json`, so `CODETURTLE_MAX_PARALLEL` and remembered
+usage limits are per host. The security model above applies to every host: any CI job running as
+that user can read its login files.
