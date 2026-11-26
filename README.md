@@ -339,7 +339,7 @@ that fails under the runner, run `claude setup-token` and save the token to
 
 ## Linux runner hosts
 
-The workflow runs on `[self-hosted, ci-pool, ci-small]`, so CI Turtle may route a review to a remote
+The workflow runs on `[self-hosted, ci-pool]`, so CI Turtle may route a review to a remote
 Linux x64 host (for example WSL2 Ubuntu) as well as the Mac. Nothing in codeturtle is macOS-specific;
 a Linux host needs, for the runner user:
 
