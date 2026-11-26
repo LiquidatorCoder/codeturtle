@@ -23,9 +23,9 @@ STATUS_COMMAND = {
 }
 TIMEOUT_S = 20
 FIX = {
-    "codex": "run `codex login` on the runner Mac",
-    "grok": "run `grok login` on the runner Mac",
-    "claude": "run `claude setup-token` on the runner Mac and save the token to "
+    "codex": "run `codex login` on the runner host",
+    "grok": "run `grok login` on the runner host",
+    "claude": "run `claude setup-token` on the runner host and save the token to "
               "`~/.codeturtle/claude-oauth-token` (mode 600)",
 }
 LOGGED_IN_RE = re.compile(r"\blogged in\b", re.IGNORECASE)
@@ -44,8 +44,8 @@ class Health:
     def fix(self) -> str:
         if self.status == "missing":
             name = self.provider
-            return f"install the {name} CLI on the runner Mac or set `CODETURTLE_{name.upper()}_BIN`"
-        return FIX.get(self.provider, f"log in to {self.provider} on the runner Mac")
+            return f"install the {name} CLI on the runner host or set `CODETURTLE_{name.upper()}_BIN`"
+        return FIX.get(self.provider, f"log in to {self.provider} on the runner host")
 
     def warning(self) -> str:
         """The note shown on the PR for a broken provider."""

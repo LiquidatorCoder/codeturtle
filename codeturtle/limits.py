@@ -144,7 +144,7 @@ def _clock(m: re.Match, now: float) -> float | None:
 
 @contextlib.contextmanager
 def _locked():
-    """The stored limits, read and rewritten under an exclusive lock (every review on this Mac
+    """The stored limits, read and rewritten under an exclusive lock (every review on this host
     shares the file). Nothing is written when the body raises."""
     root = state_dir()
     root.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,5 @@
 name: codeturtle
-description: AI pull request review on a self-hosted Mac runner (Codex → Grok → Claude on usage limits).
+description: AI pull request review on a self-hosted runner (Mac or Linux) (Codex → Grok → Claude on usage limits).
 author: LiquidatorCoder
 
 inputs:

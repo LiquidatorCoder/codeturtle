@@ -1,4 +1,4 @@
-# Copy to .github/workflows/codeturtle.yml in any repo that has the Mac runners (macci add owner/repo).
+# Copy to .github/workflows/codeturtle.yml in any repo on the self-hosted runner pool (macci add owner/repo).
 # codeturtle-protocol: 2
 name: codeturtle
 # Dispatched runs carry the caller's request id in their title so a caller can find the run it started.
@@ -43,7 +43,9 @@ jobs:
         startsWith(github.event.comment.body, '/review') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, macOS, ARM64, mac-ci]
+    # Any pool runner, the Mac or a Linux x64 host (CI Turtle routes `ci-pool` jobs): codeturtle is
+    # plain Python and the model CLIs; each host needs them installed and logged in (README).
+    runs-on: [self-hosted, ci-pool, ci-small]
     timeout-minutes: 120
     concurrency:
       group: codeturtle-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr }}
