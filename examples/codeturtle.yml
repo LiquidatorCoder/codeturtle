@@ -36,9 +36,14 @@ jobs:
   review:
     # Never start on a fork PR, and only start on a /review comment from someone with write access,
     # so an outside comment can't occupy the runner or cancel a running review via `concurrency`.
+    # The repository variable CODETURTLE_AUTHORS (a JSON list of logins, e.g. ["LiquidatorCoder"])
+    # limits the automatic review to those authors' PRs here, so other PRs never queue for a runner.
+    # Unset: every author. `/review` and dispatched runs still review any PR.
     if: >-
       (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository) ||
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (vars.CODETURTLE_AUTHORS == '' ||
+          contains(fromJSON(vars.CODETURTLE_AUTHORS), github.event.pull_request.user.login))) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
         startsWith(github.event.comment.body, '/review') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||

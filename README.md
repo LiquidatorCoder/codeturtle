@@ -67,7 +67,15 @@ follow-up). `/review fresh` (or `/review fresh full`) reviews the whole PR again
 Add the `codeturtle:skip` label to skip the automatic run.
 To review only some people's PRs automatically, list their GitHub logins in `authors` in
 `.github/codeturtle.json` (for example `{"authors": ["LiquidatorCoder"]}`); anyone else's PR is
-skipped unless someone comments `/review` on it.
+skipped unless someone comments `/review` on it. That check runs inside the job, so the skipped
+review still waits for a runner first. To keep other PRs from queueing at all, also set the
+repository variable `CODETURTLE_AUTHORS` to the same list as JSON; the workflow's `if` reads it:
+
+```bash
+gh variable set CODETURTLE_AUTHORS --repo owner/name --body '["LiquidatorCoder"]'
+```
+
+Leave it unset for every author (an empty `[]` matches nobody). Invalid JSON fails the run.
 
 > `issue_comment` and `workflow_dispatch` use the workflow file on the default branch, so `/review`
 > (and dispatched reviews) start working once the workflow is merged there.
