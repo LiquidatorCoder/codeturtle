@@ -352,6 +352,9 @@ class HarnessContractTests(unittest.TestCase):
         template = (root / "examples" / "codeturtle.yml").read_text()
         for needle in ("# codeturtle-protocol: 2", "min_tier:", "request_id:", "run-name:"):
             self.assertIn(needle, template)
+        # Other authors' PRs are filtered before a runner is needed, not only inside the job.
+        self.assertIn("contains(fromJSON(vars.CODETURTLE_AUTHORS), github.event.pull_request.user.login)", template)
+        self.assertIn("vars.CODETURTLE_AUTHORS == ''", template)
 
 
 class RedactionHardeningTests(unittest.TestCase):
